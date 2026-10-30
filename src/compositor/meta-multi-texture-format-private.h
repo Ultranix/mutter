@@ -20,6 +20,7 @@
 #pragma once
 
 #include "cogl/cogl.h"
+#include "core/util-private.h"
 #include "meta/meta-multi-texture-format.h"
 
 G_BEGIN_DECLS
@@ -35,8 +36,10 @@ typedef struct _MetaMultiTextureFormatInfo
   uint8_t vsub[COGL_PIXEL_FORMAT_MAX_PLANES]; /* vertical subsampling */
 } MetaMultiTextureFormatInfo;
 
+META_EXPORT_TEST
 const char * meta_multi_texture_format_to_string (MetaMultiTextureFormat format);
 
+META_EXPORT_TEST
 const MetaMultiTextureFormatInfo * meta_multi_texture_format_get_info (MetaMultiTextureFormat format);
 
 CoglSnippet * meta_multi_texture_format_get_snippet (MetaMultiTextureFormat       format,

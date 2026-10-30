@@ -57,3 +57,6 @@ version 2 or later. See the [COPYING][license] file for detalis.
 
 [bug-tracker]: https://gitlab.gnome.org/GNOME/mutter/issues
 [license]: COPYING
+
+The optional experimental Vulkan renderer is documented in
+[doc/vulkan.md](doc/vulkan.md).
