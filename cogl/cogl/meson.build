@@ -77,6 +77,37 @@ cogl_noop_driver_sources = [
   'driver/nop/cogl-driver-nop-private.h',
 ]
 
+cogl_vk_driver_sources = [
+  'driver/vk/cogl-device-vk-private.h',
+  'driver/vk/cogl-device-vk.c',
+  'driver/vk/cogl-image-vk-private.h',
+  'driver/vk/cogl-image-vk.c',
+  'driver/vk/cogl-fence-vk-private.h',
+  'driver/vk/cogl-fence-vk.c',
+  'driver/vk/cogl-pass-vk-private.h',
+  'driver/vk/cogl-pass-vk.c',
+  'driver/vk/cogl-pipeline-vk-private.h',
+  'driver/vk/cogl-pipeline-vk.c',
+  'driver/vk/cogl-pipeline-vk-glsl-private.h',
+  'driver/vk/cogl-pipeline-vk-glsl.c',
+  'driver/vk/cogl-pipeline-vk-assemble-private.h',
+  'driver/vk/cogl-pipeline-vk-assemble.c',
+  'driver/vk/cogl-pipeline-vk-vbo-private.h',
+  'driver/vk/cogl-pipeline-vk-vbo.c',
+  'driver/vk/cogl-vk-debug-private.h',
+  'driver/vk/cogl-vk-debug.c',
+  'driver/vk/cogl-dmabuf-memo-vk-private.h',
+  'driver/vk/cogl-dmabuf-memo-vk.c',
+  'driver/vk/cogl-buffer-impl-vk-private.h',
+  'driver/vk/cogl-buffer-impl-vk.c',
+  'driver/vk/cogl-texture-driver-vk-private.h',
+  'driver/vk/cogl-texture-driver-vk.c',
+  'driver/vk/cogl-framebuffer-vk-private.h',
+  'driver/vk/cogl-framebuffer-vk.c',
+  'driver/vk/cogl-driver-vk-private.h',
+  'driver/vk/cogl-driver-vk.c',
+]
+
 cogl_gl_prototype_headers = [
   'gl-prototypes/cogl-core-functions.h',
   'gl-prototypes/cogl-gles2-functions.h',
@@ -143,6 +174,10 @@ endif
 
 if have_gles2
   cogl_driver_sources += gles_driver_sources
+endif
+
+if have_vulkan
+  cogl_driver_sources += cogl_vk_driver_sources
 endif
 
 cogl_sources = [

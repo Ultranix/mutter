@@ -42,6 +42,10 @@
 #include "cogl/cogl-framebuffer-private.h"
 #include "cogl/cogl-blit.h"
 #include "cogl/cogl-private.h"
+#include "cogl/cogl-renderer.h"
+#ifdef HAVE_VULKAN
+#include "cogl/driver/vk/cogl-driver-vk-private.h"
+#endif
 #include "cogl/driver/gl/cogl-driver-gl-private.h"
 #include "cogl/driver/gl/cogl-texture-driver-gl-private.h"
 
@@ -190,27 +194,56 @@ _cogl_atlas_get_next_size (unsigned int *map_width,
     *map_height <<= 1;
 }
 
-static void
-_cogl_atlas_get_initial_size (CoglContext *ctx,
-                              CoglPixelFormat format,
-                              unsigned int *map_width,
-                              unsigned int *map_height)
+static gboolean
+_cogl_atlas_texture_size_supported (CoglContext     *ctx,
+                                    CoglPixelFormat  format,
+                                    unsigned int     width,
+                                    unsigned int     height)
 {
   CoglDriver *driver = cogl_context_get_driver (ctx);
-  CoglDriverGL *driver_gl = COGL_DRIVER_GL (driver);
-  CoglDriverGLClass *driver_klass = COGL_DRIVER_GL_GET_CLASS (driver_gl);
-  unsigned int size;
+  CoglDriverGL *driver_gl;
+  CoglDriverGLClass *driver_klass;
   GLenum gl_intformat;
   GLenum gl_format;
   GLenum gl_type;
 
-  g_return_if_fail (cogl_pixel_format_get_n_planes (format) == 1);
+#ifdef HAVE_VULKAN
+  if (cogl_renderer_get_driver_id (cogl_context_get_renderer (ctx)) ==
+      COGL_DRIVER_ID_VULKAN)
+    {
+      CoglVkDevice *device =
+        cogl_driver_vk_peek_device (COGL_DRIVER_VK (driver));
 
+      return width > 0 && height > 0 &&
+             width <= device->limits.maxImageDimension2D &&
+             height <= device->limits.maxImageDimension2D;
+    }
+#endif
+
+  driver_gl = COGL_DRIVER_GL (driver);
+  driver_klass = COGL_DRIVER_GL_GET_CLASS (driver_gl);
   driver_klass->pixel_format_to_gl (driver_gl,
                                     format,
                                     &gl_intformat,
                                     &gl_format,
                                     &gl_type);
+  return driver_klass->texture_size_supported (driver_gl,
+                                               GL_TEXTURE_2D,
+                                               gl_intformat,
+                                               gl_format,
+                                               gl_type,
+                                               width, height);
+}
+
+static void
+_cogl_atlas_get_initial_size (CoglContext    *ctx,
+                              CoglPixelFormat format,
+                              unsigned int   *map_width,
+                              unsigned int   *map_height)
+{
+  unsigned int size;
+
+  g_return_if_fail (cogl_pixel_format_get_n_planes (format) == 1);
 
   /* At least on Intel hardware, the texture size will be rounded up
      to at least 1MB so we might as well try to aim for that as an
@@ -225,12 +258,7 @@ _cogl_atlas_get_initial_size (CoglContext *ctx,
   /* Some platforms might not support this large size so we'll
      decrease the size until it can */
   while (size > 1 &&
-         !driver_klass->texture_size_supported (driver_gl,
-                                                GL_TEXTURE_2D,
-                                                gl_intformat,
-                                                gl_format,
-                                                gl_type,
-                                                size, size))
+         !_cogl_atlas_texture_size_supported (ctx, format, size, size))
     size >>= 1;
 
   *map_width = size;
@@ -245,27 +273,10 @@ _cogl_atlas_create_map (CoglContext             *ctx,
                         unsigned int             n_textures,
                         CoglAtlasRepositionData *textures)
 {
-  CoglDriver *driver = cogl_context_get_driver (ctx);
-  CoglDriverGL *driver_gl = COGL_DRIVER_GL (driver);
-  CoglDriverGLClass *driver_klass = COGL_DRIVER_GL_GET_CLASS (driver_gl);
-  GLenum gl_intformat;
-  GLenum gl_format;
-  GLenum gl_type;
-
-  driver_klass->pixel_format_to_gl (driver_gl,
-                                    format,
-                                    &gl_intformat,
-                                    &gl_format,
-                                    &gl_type);
-
   /* Keep trying increasingly larger atlases until we can fit all of
      the textures */
-  while (driver_klass->texture_size_supported (driver_gl,
-                                               GL_TEXTURE_2D,
-                                               gl_intformat,
-                                               gl_format,
-                                               gl_type,
-                                               map_width, map_height))
+  while (_cogl_atlas_texture_size_supported (ctx, format,
+                                             map_width, map_height))
     {
       CoglRectangleMap *new_atlas = _cogl_rectangle_map_new (map_width,
                                                              map_height,

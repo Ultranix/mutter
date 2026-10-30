@@ -201,6 +201,14 @@ if have_gles2
   endif
 endif
 
+vulkan_dep = dependency('vulkan', required: get_option('vulkan'))
+have_vulkan = vulkan_dep.found()
+have_shaderc = false
+if have_vulkan
+  shaderc_dep = dependency('shaderc', required: true)
+  have_shaderc = shaderc_dep.found()
+endif
+
 if not have_gl and not have_gles2
   error('Neither GLES2 or OpenGL was enabled')
 endif
@@ -544,6 +552,8 @@ cdata.set_quoted('PACKAGE_VERSION', meson.project_version())
 cdata.set('HAVE_EGL', have_egl)
 cdata.set('HAVE_GL', have_gl)
 cdata.set('HAVE_GLES2', have_gles2)
+cdata.set('HAVE_VULKAN', have_vulkan)
+cdata.set('HAVE_SHADERC', have_shaderc)
 cdata.set('HAVE_XWAYLAND', have_xwayland)
 cdata.set('HAVE_REMOTE_DESKTOP', have_remote_desktop)
 cdata.set('HAVE_DEVKIT', have_devkit)
@@ -731,6 +741,7 @@ summary('Bash completion', have_bash_completion, section: 'Shell integration')
 summary('OpenGL', have_gl, section: 'Rendering APIs')
 summary('GLES2', have_gles2, section: 'Rendering APIs')
 summary('EGL', have_egl, section: 'Rendering APIs')
+summary('Vulkan (experimental)', have_vulkan, section: 'Rendering APIs')
 
 summary('XWayland', have_xwayland, section: 'Options')
 summary('Remote desktop', have_remote_desktop, section: 'Options')

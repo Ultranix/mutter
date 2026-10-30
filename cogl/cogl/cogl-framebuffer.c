@@ -48,6 +48,10 @@
 #include "cogl/cogl-trace.h"
 #include "cogl/driver/gl/cogl-driver-gl-private.h"
 #include "cogl/winsys/cogl-winsys.h"
+#ifdef HAVE_VULKAN
+#include "cogl/driver/vk/cogl-driver-vk-private.h"
+#include "cogl/driver/vk/cogl-framebuffer-vk-private.h"
+#endif
 
 enum
 {
@@ -1568,6 +1572,16 @@ cogl_framebuffer_blit_box (CoglFramebuffer *framebuffer,
       src_y1 = cogl_framebuffer_get_height (framebuffer) - src_y1;
       src_y2 = src_y1 - (dst_y2 - dst_y1);
     }
+
+#ifdef HAVE_VULKAN
+  if (COGL_IS_DRIVER_VK (driver))
+    {
+      cogl_framebuffer_vk_blit_box (framebuffer, dst,
+                                    src_x1, src_y1, src_x2, src_y2,
+                                    dst_x1, dst_y1, dst_x2, dst_y2);
+      return;
+    }
+#endif
 
   GE (driver, glBlitFramebuffer (src_x1, src_y1, src_x2, src_y2,
                                  dst_x1, dst_y1, dst_x2, dst_y2,

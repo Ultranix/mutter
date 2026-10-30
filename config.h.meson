@@ -31,6 +31,12 @@
 /* Have GLES 2.0 for rendering */
 #mesondefine HAVE_GLES2
 
+/* Experimental Cogl Vulkan driver */
+#mesondefine HAVE_VULKAN
+
+/* GLSL to SPIR-V compiler for the Vulkan driver */
+#mesondefine HAVE_SHADERC
+
 /* Building with libwacom for advanced tablet management */
 #mesondefine HAVE_LIBWACOM
 

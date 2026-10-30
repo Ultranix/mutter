@@ -235,7 +235,7 @@ _cogl_framebuffer_read_pixels_into_bitmap (CoglFramebuffer *framebuffer,
 CoglJournal *
 cogl_framebuffer_get_journal (CoglFramebuffer *framebuffer);
 
-CoglFramebufferDriver *
+COGL_EXPORT CoglFramebufferDriver *
 cogl_framebuffer_get_driver (CoglFramebuffer *framebuffer);
 
 /**

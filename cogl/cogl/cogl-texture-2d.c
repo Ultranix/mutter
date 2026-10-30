@@ -308,6 +308,85 @@ cogl_texture_2d_new_from_data (CoglContext *ctx,
   return tex_2d;
 }
 
+#ifdef HAVE_VULKAN
+#include "cogl/driver/vk/cogl-texture-driver-vk-private.h"
+#include <unistd.h>
+
+CoglTexture *
+cogl_texture_2d_new_from_dma_buf (CoglContext     *ctx,
+                                  int              width,
+                                  int              height,
+                                  CoglPixelFormat  format,
+                                  uint32_t         drm_fourcc,
+                                  int              n_planes,
+                                  const int       *fds,
+                                  const uint32_t  *strides,
+                                  const uint32_t  *offsets,
+                                  const uint64_t  *modifiers,
+                                  GError         **error)
+{
+  return cogl_texture_2d_vk_new_from_dmabuf (ctx, width, height, format,
+                                             drm_fourcc, n_planes,
+                                             fds, strides, offsets, modifiers,
+                                             COGL_YUV_MATRIX_BT709,
+                                             COGL_YUV_RANGE_NARROW, error);
+}
+
+CoglTexture *
+cogl_texture_2d_new_from_dma_buf_with_colorimetry (CoglContext     *ctx,
+                                                   int              width,
+                                                   int              height,
+                                                   CoglPixelFormat  format,
+                                                   uint32_t         drm_fourcc,
+                                                   int              n_planes,
+                                                   const int       *fds,
+                                                   const uint32_t  *strides,
+                                                   const uint32_t  *offsets,
+                                                   const uint64_t  *modifiers,
+                                                   CoglYuvMatrix    matrix,
+                                                   CoglYuvRange     range,
+                                                   GError         **error)
+{
+  return cogl_texture_2d_vk_new_from_dmabuf (ctx, width, height, format,
+                                             drm_fourcc, n_planes,
+                                             fds, strides, offsets, modifiers,
+                                             matrix, range, error);
+}
+
+gboolean
+cogl_texture_2d_set_yuv_colorimetry (CoglTexture  *texture,
+                                     CoglYuvMatrix matrix,
+                                     CoglYuvRange  range,
+                                     GError      **error)
+{
+  if (!COGL_IS_TEXTURE_2D_VK (texture))
+    {
+      g_set_error_literal (error, COGL_SYSTEM_ERROR, COGL_SYSTEM_ERROR_UNSUPPORTED,
+                           "Whole-image YUV colorimetry requires a Vulkan texture");
+      return FALSE;
+    }
+  return cogl_texture_2d_vk_set_yuv_colorimetry (COGL_TEXTURE_2D_VK (texture),
+                                                 matrix, range, error);
+}
+
+void
+cogl_texture_2d_set_acquire_sync_fd (CoglTexture *texture,
+                                     int          sync_fd)
+{
+  if (!texture || !COGL_IS_TEXTURE_2D_VK (texture))
+    {
+      if (sync_fd >= 0)
+        {
+          close (sync_fd);
+        }
+      return;
+    }
+
+  cogl_texture_2d_vk_set_acquire_sync_fd (COGL_TEXTURE_2D_VK (texture),
+                                          sync_fd);
+}
+#endif
+
 void
 _cogl_texture_2d_externally_modified (CoglTexture *texture)
 {

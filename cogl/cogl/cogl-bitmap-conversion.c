@@ -776,15 +776,14 @@ driver_can_convert (CoglDriver     *driver,
 }
 
 CoglBitmap *
-_cogl_bitmap_convert_for_upload (CoglBitmap *src_bmp,
+_cogl_bitmap_convert_for_upload (CoglBitmap     *src_bmp,
                                  CoglPixelFormat internal_format,
-                                 GError **error)
+                                 GError        **error)
 {
   CoglContext *ctx = _cogl_bitmap_get_context (src_bmp);
   CoglPixelFormat src_format = cogl_bitmap_get_format (src_bmp);
   CoglDriver *driver = cogl_context_get_driver (ctx);
-  CoglDriverGL *driver_gl = COGL_DRIVER_GL (driver);
-  CoglDriverGLClass *driver_klass = COGL_DRIVER_GL_GET_CLASS (driver_gl);
+  CoglRenderer *renderer = cogl_context_get_renderer (ctx);
   CoglBitmap *dst_bmp;
 
   g_return_val_if_fail (internal_format != COGL_PIXEL_FORMAT_ANY, NULL);
@@ -795,7 +794,8 @@ _cogl_bitmap_convert_for_upload (CoglBitmap *src_bmp,
      than the Cogl bitmap code. However under GLES the internal format
      must be the same as the bitmap format and it only supports a
      limited number of formats so we must convert using the Cogl
-     bitmap code instead */
+     bitmap code instead.
+     Vulkan has no GL pixel_format_to_gl — CPU-convert to internal. */
 
   if (driver_can_convert (driver, src_format, internal_format))
     {
@@ -817,12 +817,24 @@ _cogl_bitmap_convert_for_upload (CoglBitmap *src_bmp,
     {
       CoglPixelFormat closest_format;
 
-      closest_format =
-        driver_klass->pixel_format_to_gl (driver_gl,
-                                          internal_format,
-                                          NULL, /* ignore gl intformat */
-                                          NULL, /* ignore gl format */
-                                          NULL); /* ignore gl type */
+      if (cogl_renderer_get_driver_id (renderer) == COGL_DRIVER_ID_VULKAN ||
+          !COGL_IS_DRIVER_GL (driver))
+        {
+          closest_format = internal_format;
+        }
+      else
+        {
+          CoglDriverGL *driver_gl = COGL_DRIVER_GL (driver);
+          CoglDriverGLClass *driver_klass =
+            COGL_DRIVER_GL_GET_CLASS (driver_gl);
+
+          closest_format =
+            driver_klass->pixel_format_to_gl (driver_gl,
+                                              internal_format,
+                                              NULL, /* ignore gl intformat */
+                                              NULL, /* ignore gl format */
+                                              NULL); /* ignore gl type */
+        }
 
       if (closest_format != src_format)
         dst_bmp = _cogl_bitmap_convert (src_bmp, closest_format, error);
