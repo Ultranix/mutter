@@ -1,4 +1,8 @@
 cogl_tests = [
+  [ 'test-perspective-position', [] ],
+  [ 'test-secondary-egl', [] ],
+  [ 'test-yuv-coefficients', [] ],
+  [ 'test-scissored-clear', [] ],
   [ 'test-atlas-migration', [] ],
   [ 'test-blend-strings', [] ],
   [ 'test-blend', [] ],
@@ -72,6 +76,14 @@ foreach name, value: sanitizer_variables
 endforeach
 
 cogl_test_variants = [ 'gl3', 'gles2' ]
+if have_vulkan
+  cogl_test_variants += ['vulkan']
+  cogl_tests += [
+    ['test-descriptor-pools', []],
+    ['test-attribute-limits', []],
+    ['test-vk-low-level', []],
+  ]
+endif
 
 foreach cogl_test: cogl_tests
   test_case = cogl_test[0]
@@ -86,18 +98,24 @@ foreach cogl_test: cogl_tests
     include_directories: cogl_test_conformance_includes,
     dependencies: [
       libmutter_test_dep,
+      have_vulkan ? vulkan_dep : [],
+      egl_dep,
     ],
     install_rpath: pkglibdir,
   )
 
-  foreach variant: cogl_test_variants
+  variants = cogl_test_variants
+  if test_case in ['test-descriptor-pools', 'test-vk-low-level', 'test-attribute-limits']
+    variants = ['vulkan']
+  endif
+  foreach variant: variants
     variant_test_env = test_env
     variant_test_env.set('COGL_DRIVER', variant)
     variant_test_env.set('COGL_DEBUG', 'winsys')
 
     test(test_name + '-' + variant, test_executable,
       args: variant in known_failures ? ['-m', 'no-undefined'] : [],
-      suite: ['cogl', 'cogl/conform'],
+      suite: ['cogl', 'cogl/conform', 'cogl/conform/' + variant],
       env: variant_test_env,
       is_parallel: false,
     )
