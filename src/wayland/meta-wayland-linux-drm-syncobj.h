@@ -57,3 +57,8 @@ int
 meta_wayland_sync_timeline_get_eventfd (MetaWaylandSyncobjTimeline  *timeline,
                                         uint64_t                     sync_point,
                                         GError                     **error);
+
+int
+meta_wayland_sync_timeline_export_sync_file (MetaWaylandSyncobjTimeline  *timeline,
+                                             uint64_t                     sync_point,
+                                             GError                     **error);

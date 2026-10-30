@@ -287,6 +287,57 @@ meta_drm_timeline_is_signaled (MetaDrmTimeline  *timeline,
   return TRUE;
 }
 
+int
+meta_drm_timeline_export_sync_file (MetaDrmTimeline  *timeline,
+                                    uint64_t          sync_point,
+                                    GError          **error)
+{
+  uint32_t tmp = 0;
+  int sync_fd = -1;
+
+  if (drmSyncobjCreate (timeline->drm, 0, &tmp) != 0)
+    {
+      g_set_error (error,
+                   G_IO_ERROR,
+                   G_IO_ERROR_FAILED,
+                   "drmSyncobjCreate failed: %s",
+                   g_strerror (errno));
+      return -1;
+    }
+
+  if (drmSyncobjTransfer (timeline->drm,
+                          tmp, 0,
+                          timeline->drm_syncobj, sync_point,
+                          0) != 0)
+    {
+      int saved_errno = errno;
+
+      drmSyncobjDestroy (timeline->drm, tmp);
+      g_set_error (error,
+                   G_IO_ERROR,
+                   G_IO_ERROR_FAILED,
+                   "drmSyncobjTransfer failed: %s",
+                   g_strerror (saved_errno));
+      return -1;
+    }
+
+  if (drmSyncobjExportSyncFile (timeline->drm, tmp, &sync_fd) != 0)
+    {
+      int saved_errno = errno;
+
+      drmSyncobjDestroy (timeline->drm, tmp);
+      g_set_error (error,
+                   G_IO_ERROR,
+                   G_IO_ERROR_FAILED,
+                   "drmSyncobjExportSyncFile failed: %s",
+                   g_strerror (saved_errno));
+      return -1;
+    }
+
+  drmSyncobjDestroy (timeline->drm, tmp);
+  return sync_fd;
+}
+
 static void
 meta_drm_timeline_finalize (GObject *object)
 {

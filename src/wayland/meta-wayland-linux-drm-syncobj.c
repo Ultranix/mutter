@@ -189,6 +189,16 @@ meta_wayland_sync_timeline_get_eventfd (MetaWaylandSyncobjTimeline  *timeline,
                                         error);
 }
 
+int
+meta_wayland_sync_timeline_export_sync_file (MetaWaylandSyncobjTimeline  *timeline,
+                                             uint64_t                     sync_point,
+                                             GError                     **error)
+{
+  return meta_drm_timeline_export_sync_file (timeline->drm_timeline,
+                                             sync_point,
+                                             error);
+}
+
 static void
 syncobj_surface_handle_destroy (struct wl_client   *client,
                                 struct wl_resource *resource)

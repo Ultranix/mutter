@@ -1238,23 +1238,10 @@ init_secondary_gpu_data_gpu (MetaRendererNative  *renderer_native,
       goto out;
     }
 
-  cogl_context = meta_renderer_native_get_cogl_context (renderer_native);
-  if (cogl_context)
+  if (!meta_renderer_native_gles3_validate_context (renderer_egl, error))
     {
-      CoglDriver *driver = cogl_context_get_driver (cogl_context);
-      CoglRenderer *cogl_renderer =
-        cogl_display_get_renderer (cogl_context_get_display (cogl_context));
-      g_auto (GStrv) gl_extensions =
-        cogl_driver_gl_get_gl_extensions (COGL_DRIVER_GL (driver),
-                                          cogl_renderer);
-
-      if (!cogl_check_extension ("GL_OES_EGL_image_external",
-                                 gl_extensions))
-        {
-          g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
-                       "Missing OpenGL ES extensions: GL_OES_EGL_image_external");
-          goto out;
-        }
+      cogl_renderer_egl_destroy_context (renderer_egl, egl_context, NULL);
+      goto out;
     }
 
   secondary_gpu_data->egl_context = egl_context;

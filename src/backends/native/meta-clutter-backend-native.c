@@ -44,12 +44,15 @@
 #include "backends/meta-cursor-xcursor.h"
 #include "backends/meta-renderer.h"
 #include "backends/native/meta-backend-native.h"
+#include "backends/native/meta-device-pool.h"
 #include "backends/native/meta-renderer-native-private.h"
 #include "backends/native/meta-seat-native.h"
 #include "backends/native/meta-sprite-native.h"
 #include "backends/native/meta-stage-native.h"
 #include "clutter/clutter.h"
 #include "cogl/cogl.h"
+#include "cogl/cogl-context-egl.h"
+#include "cogl/cogl-renderer.h"
 #include "core/bell.h"
 #include "meta/meta-backend.h"
 
@@ -119,6 +122,31 @@ meta_clutter_backend_native_get_context (ClutterBackend  *clutter_backend,
                                          CoglDisplay     *display,
                                          GError         **error)
 {
+#ifdef HAVE_VULKAN
+  MetaClutterBackendNative *clutter_backend_native =
+    META_CLUTTER_BACKEND_NATIVE (clutter_backend);
+  CoglRenderer *cogl_renderer = cogl_display_get_renderer (display);
+
+  if (cogl_renderer_get_driver_id (cogl_renderer) == COGL_DRIVER_ID_VULKAN)
+    {
+      MetaBackend *backend = clutter_backend_native->backend;
+      MetaRenderer *renderer = meta_backend_get_renderer (backend);
+      MetaDeviceFile *device_file;
+
+      if (META_IS_RENDERER_NATIVE (renderer))
+        {
+          device_file =
+            meta_renderer_native_get_primary_device_file (
+              META_RENDERER_NATIVE (renderer));
+          if (device_file)
+            {
+              cogl_renderer_set_vulkan_drm_fd (cogl_renderer,
+                                               meta_device_file_get_fd (device_file));
+            }
+        }
+    }
+#endif
+
   return cogl_context_egl_new (display, error);
 }
 

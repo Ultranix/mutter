@@ -27,6 +27,12 @@
 #include "wayland/meta-wayland-buffer.h"
 #include "wayland/meta-wayland-dma-buf.h"
 #include "wayland/meta-wayland-linux-drm-syncobj.h"
+#ifdef HAVE_VULKAN
+#include "meta/meta-multi-texture.h"
+#include "cogl/cogl-texture-2d.h"
+#include "cogl/cogl-renderer.h"
+#include "meta/util.h"
+#endif
 
 #define META_WAYLAND_TRANSACTION_NONE ((void *)(uintptr_t) G_MAXSIZE)
 
@@ -214,6 +220,39 @@ meta_wayland_transaction_apply (MetaWaylandTransaction  *transaction,
       states[i] = entry->state;
       if (entry->state)
         meta_wayland_surface_apply_state (surface, entry->state);
+
+#ifdef HAVE_VULKAN
+      if (entry->state && surface->buffer && surface->buffer->dma_buf.texture)
+        {
+          MetaWaylandSyncPoint *acquire = entry->state->drm_syncobj.acquire;
+          MetaMultiTexture *texture = surface->buffer->dma_buf.texture;
+          int n_planes = meta_multi_texture_get_n_planes (texture);
+          CoglTexture *first_plane = meta_multi_texture_get_plane (texture, 0);
+          CoglContext *cogl_context = cogl_texture_get_context (first_plane);
+
+          if (cogl_renderer_get_driver_id (
+                cogl_context_get_renderer (cogl_context)) == COGL_DRIVER_ID_VULKAN)
+            {
+              int plane;
+
+              for (plane = 0; plane < n_planes; plane++)
+                {
+                  g_autoptr (GError) error = NULL;
+                  int fd = -1;
+
+                  if (acquire && acquire->timeline)
+                    fd = meta_wayland_sync_timeline_export_sync_file (
+                      acquire->timeline, acquire->sync_point, &error);
+                  if (error)
+                    meta_topic (META_DEBUG_RENDER,
+                                "Failed to export Vulkan acquire fence: %s",
+                                error->message);
+                  cogl_texture_2d_set_acquire_sync_fd (
+                    meta_multi_texture_get_plane (texture, plane), fd);
+                }
+            }
+        }
+#endif
 
       if (surface->transaction.last_committed == transaction)
         {

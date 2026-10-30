@@ -37,3 +37,6 @@ gboolean meta_renderer_native_gles3_blit_shared_bo (CoglDriver       *driver,
 
 void meta_renderer_native_gles3_forget_context (CoglDriver *driver,
                                                 EGLContext  egl_context);
+
+gboolean meta_renderer_native_gles3_validate_context (CoglRendererEGL *renderer,
+                                                      GError         **error);
