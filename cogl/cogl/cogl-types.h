@@ -292,6 +292,21 @@ typedef struct _CoglPipeline CoglPipeline;
 typedef struct _CoglPixelBuffer CoglPixelBuffer;
 typedef struct _CoglPrimitive CoglPrimitive;
 typedef struct _CoglRenderbuffers CoglRenderbuffers;
+
+/* Color interpretation of a whole-image YUV texture. */
+typedef enum
+{
+  COGL_YUV_MATRIX_BT709,
+  COGL_YUV_MATRIX_BT601,
+  COGL_YUV_MATRIX_BT2020,
+} CoglYuvMatrix;
+
+typedef enum
+{
+  COGL_YUV_RANGE_NARROW,
+  COGL_YUV_RANGE_FULL,
+} CoglYuvRange;
+
 typedef struct _CoglRenderer CoglRenderer;
 typedef struct _CoglScanout CoglScanout;
 typedef struct _CoglScanoutBuffer CoglScanoutBuffer;

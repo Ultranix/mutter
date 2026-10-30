@@ -46,6 +46,9 @@
 #include "cogl/cogl-renderer-private.h"
 #include "cogl/cogl-driver-private.h"
 #include "cogl/driver/nop/cogl-driver-nop-private.h"
+#ifdef HAVE_VULKAN
+#include "cogl/driver/vk/cogl-driver-vk-private.h"
+#endif
 
 
 static CoglDriverId _cogl_drivers[] =
@@ -192,6 +195,8 @@ driver_name_to_id (const char *name)
     return COGL_DRIVER_ID_GLES2;
   else if (g_ascii_strcasecmp ("nop", name) == 0)
     return COGL_DRIVER_ID_NOP;
+  else if (g_ascii_strcasecmp ("vulkan", name) == 0)
+    return COGL_DRIVER_ID_VULKAN;
 
   return COGL_DRIVER_ID_ANY;
 }
@@ -448,3 +453,22 @@ cogl_renderer_get_render_device (CoglRenderer *renderer)
 
   return priv->render_device;
 }
+#ifdef HAVE_VULKAN
+void
+cogl_renderer_set_vulkan_drm_fd (CoglRenderer *renderer,
+                                 int           drm_fd)
+{
+  CoglDriver *driver;
+
+  g_return_if_fail (COGL_IS_RENDERER (renderer));
+
+  if (cogl_renderer_get_driver_id (renderer) != COGL_DRIVER_ID_VULKAN)
+    return;
+
+  driver = cogl_renderer_get_driver (renderer);
+  if (!COGL_IS_DRIVER_VK (driver))
+    return;
+
+  cogl_driver_vk_set_drm_fd (COGL_DRIVER_VK (driver), drm_fd);
+}
+#endif

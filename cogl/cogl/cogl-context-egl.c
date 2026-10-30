@@ -167,6 +167,54 @@ cogl_context_egl_initable_init (GInitable     *initable,
   if (!parent_iface->init (initable, cancellable, error))
     return FALSE;
 
+#ifdef HAVE_VULKAN
+  if (cogl_renderer_get_driver_id (renderer) == COGL_DRIVER_ID_VULKAN)
+    {
+      if (!cogl_driver_update_features (driver, renderer, error))
+        return FALSE;
+
+      if (COGL_DRIVER_GET_CLASS (driver)->context_init &&
+          !COGL_DRIVER_GET_CLASS (driver)->context_init (driver, context))
+        {
+          g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                       "Failed to initialize Vulkan context");
+          return FALSE;
+        }
+
+      /* Binary SYNC_FD export replaces EGL_ANDROID_native_fence_sync. */
+      cogl_context_set_winsys_feature (context,
+                                       COGL_WINSYS_FEATURE_SYNC_FD,
+                                       TRUE);
+      /* Software-tracked via Meta BO age / MetaOnscreenNative::swap_region,
+       * not EGL_EXT_buffer_age / EGL_NOK_swap_region. */
+      cogl_context_set_winsys_feature (context,
+                                       COGL_WINSYS_FEATURE_BUFFER_AGE,
+                                       TRUE);
+      cogl_context_set_winsys_feature (context,
+                                       COGL_WINSYS_FEATURE_SWAP_REGION,
+                                       TRUE);
+
+      _cogl_pipeline_init_default_layers (context);
+
+      {
+        g_autoptr (CoglTexture) default_texture =
+          cogl_texture_2d_new_from_data (context,
+                                         1, 1,
+                                         COGL_PIXEL_FORMAT_RGBA_8888_PRE,
+                                         0,
+                                         white_pixel,
+                                         error);
+        if (!default_texture)
+          return FALSE;
+
+        cogl_context_set_default_2d_texture (context,
+                                             g_steal_pointer (&default_texture));
+      }
+
+      return TRUE;
+    }
+#endif
+
   g_return_val_if_fail (cogl_display_egl_get_egl_context (egl_display), FALSE);
 
   cogl_renderer_egl_init_extensions (renderer);

@@ -28,6 +28,12 @@ option('egl',
   description: 'Enable EGL support'
 )
 
+option('vulkan',
+  type: 'feature',
+  value: 'disabled',
+  description: 'Enable the experimental Cogl Vulkan driver'
+)
+
 option('xwayland',
   type: 'boolean',
   value: true,

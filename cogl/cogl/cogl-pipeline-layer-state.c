@@ -40,6 +40,7 @@
 #include "cogl/cogl-snippet-private.h"
 #include "cogl/cogl-texture-private.h"
 #include "cogl/cogl-pipeline-layer-state-private.h"
+#include "cogl/cogl-sampler-cache-private.h"
 
 #include "string.h"
 
@@ -707,11 +708,17 @@ _cogl_pipeline_layer_texture_data_equal (CoglPipelineLayer *authority0,
   else
     {
       GLuint gl_handle0, gl_handle1;
+      CoglTexture2D *leaf0;
+      CoglTexture2D *leaf1;
 
-      cogl_texture_get_gl_texture (authority0->texture, &gl_handle0, NULL);
-      cogl_texture_get_gl_texture (authority1->texture, &gl_handle1, NULL);
+      if (cogl_texture_get_gl_texture (authority0->texture, &gl_handle0, NULL) &&
+          cogl_texture_get_gl_texture (authority1->texture, &gl_handle1, NULL))
+        return gl_handle0 == gl_handle1;
 
-      return gl_handle0 == gl_handle1;
+      /* Vulkan / non-GL: compare allocated leaves (atlas may share a leaf). */
+      leaf0 = cogl_texture_get_first_leaf (authority0->texture);
+      leaf1 = cogl_texture_get_first_leaf (authority1->texture);
+      return leaf0 != NULL && leaf0 == leaf1;
     }
 }
 
@@ -770,11 +777,37 @@ gboolean
 _cogl_pipeline_layer_sampler_equal (CoglPipelineLayer *authority0,
                                     CoglPipelineLayer *authority1)
 {
-  /* We compare the actual sampler objects rather than just the entry
-     pointers because two states with different values can lead to the
-     same state in GL terms when AUTOMATIC is used as a wrap mode */
-  return (authority0->sampler_cache_entry->sampler_object ==
-          authority1->sampler_cache_entry->sampler_object);
+  const CoglSamplerCacheEntry *e0 = authority0->sampler_cache_entry;
+  const CoglSamplerCacheEntry *e1 = authority1->sampler_cache_entry;
+  CoglSamplerCacheWrapMode wrap0_s, wrap0_t, wrap1_s, wrap1_t;
+
+  /* GL compares sampler_object ids. Vulkan never creates those (always
+   * 0), so REPEAT vs CLAMP compared equal and the journal batched wrap
+   * tests into one REPEAT draw. Compare canonical wrap+filter instead;
+   * AUTOMATIC matches CLAMP_TO_EDGE (same as the GL sampler cache). */
+  if (!e0 || !e1)
+    return e0 == e1;
+
+  if (e0->sampler_object || e1->sampler_object)
+    return e0->sampler_object == e1->sampler_object;
+
+  wrap0_s = e0->wrap_mode_s;
+  wrap0_t = e0->wrap_mode_t;
+  wrap1_s = e1->wrap_mode_s;
+  wrap1_t = e1->wrap_mode_t;
+  if (wrap0_s == COGL_SAMPLER_CACHE_WRAP_MODE_AUTOMATIC)
+    wrap0_s = COGL_SAMPLER_CACHE_WRAP_MODE_CLAMP_TO_EDGE;
+  if (wrap0_t == COGL_SAMPLER_CACHE_WRAP_MODE_AUTOMATIC)
+    wrap0_t = COGL_SAMPLER_CACHE_WRAP_MODE_CLAMP_TO_EDGE;
+  if (wrap1_s == COGL_SAMPLER_CACHE_WRAP_MODE_AUTOMATIC)
+    wrap1_s = COGL_SAMPLER_CACHE_WRAP_MODE_CLAMP_TO_EDGE;
+  if (wrap1_t == COGL_SAMPLER_CACHE_WRAP_MODE_AUTOMATIC)
+    wrap1_t = COGL_SAMPLER_CACHE_WRAP_MODE_CLAMP_TO_EDGE;
+
+  return (e0->min_filter == e1->min_filter &&
+          e0->mag_filter == e1->mag_filter &&
+          wrap0_s == wrap1_s &&
+          wrap0_t == wrap1_t);
 }
 
 gboolean
@@ -1331,16 +1364,28 @@ _cogl_pipeline_layer_hash_unit_state (CoglPipelineLayer *authority,
 }
 
 void
-_cogl_pipeline_layer_hash_texture_data_state (CoglPipelineLayer *authority,
-                                              CoglPipelineLayer **authorities,
+_cogl_pipeline_layer_hash_texture_data_state (CoglPipelineLayer     *authority,
+                                              CoglPipelineLayer    **authorities,
                                               CoglPipelineHashState *state)
 {
   GLuint gl_handle;
+  CoglTexture2D *leaf;
+  gconstpointer key;
 
-  cogl_texture_get_gl_texture (authority->texture, &gl_handle, NULL);
+  if (cogl_texture_get_gl_texture (authority->texture, &gl_handle, NULL))
+    {
+      state->hash =
+        _cogl_util_one_at_a_time_hash (state->hash, &gl_handle,
+                                       sizeof (gl_handle));
+      return;
+    }
 
+  leaf = authority->texture
+         ? cogl_texture_get_first_leaf (authority->texture)
+         : NULL;
+  key = leaf ? (gconstpointer) leaf : (gconstpointer) authority->texture;
   state->hash =
-    _cogl_util_one_at_a_time_hash (state->hash, &gl_handle, sizeof (gl_handle));
+    _cogl_util_one_at_a_time_hash (state->hash, &key, sizeof (key));
 }
 
 void

@@ -42,6 +42,18 @@ if have_gles2
   ]
 endif
 
+if have_vulkan
+  cogl_pkg_deps += [
+    vulkan_dep,
+    libdrm_dep,
+  ]
+  if have_shaderc
+    cogl_pkg_deps += [
+      shaderc_dep,
+    ]
+  endif
+endif
+
 cogl_deps = [
   cogl_pkg_deps,
   cogl_pkg_private_deps,

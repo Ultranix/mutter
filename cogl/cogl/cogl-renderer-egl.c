@@ -43,6 +43,10 @@
 #ifdef HAVE_GLES2
 #include "cogl/driver/gl/gles2/cogl-driver-gles2-private.h"
 #endif
+#ifdef HAVE_VULKAN
+#include "cogl/driver/vk/cogl-driver-vk-private.h"
+#include "cogl/driver/vk/cogl-texture-driver-vk-private.h"
+#endif
 
 #include "cogl/cogl-renderer-egl-private.h"
 
@@ -206,9 +210,14 @@ cogl_renderer_egl_dispose (GObject *object)
 static void
 cogl_renderer_egl_bind_api (CoglRenderer *renderer)
 {
-  if (cogl_renderer_get_driver_id (renderer) == COGL_DRIVER_ID_GL3)
+  CoglDriverId driver_id = cogl_renderer_get_driver_id (renderer);
+
+  if (driver_id == COGL_DRIVER_ID_VULKAN)
+    return;
+
+  if (driver_id == COGL_DRIVER_ID_GL3)
     eglBindAPI (EGL_OPENGL_API);
-  else if (cogl_renderer_get_driver_id (renderer) == COGL_DRIVER_ID_GLES2)
+  else if (driver_id == COGL_DRIVER_ID_GLES2)
     eglBindAPI (EGL_OPENGL_ES_API);
 }
 
@@ -239,6 +248,16 @@ cogl_renderer_egl_load_driver (CoglRenderer  *renderer,
     {
       driver = g_object_new (COGL_TYPE_DRIVER_GLES2, NULL);
       libgl_name = COGL_GLES2_LIBNAME;
+    }
+#endif
+#ifdef HAVE_VULKAN
+  if (driver_id == COGL_DRIVER_ID_VULKAN)
+    {
+      /* No libGL / EGL GL context — Vulkan owns the GPU device. GBM/KMS
+       * remain in the native backend for scanout (Weston-style split). */
+      driver = g_object_new (COGL_TYPE_DRIVER_VK, NULL);
+      cogl_renderer_set_driver (renderer, driver);
+      return TRUE;
     }
 #endif
 
@@ -656,6 +675,38 @@ cogl_renderer_egl_create_dma_buf_framebuffer (CoglRenderer     *renderer,
       return NULL;
     }
 
+#ifdef HAVE_VULKAN
+  if (cogl_renderer_get_driver_id (renderer) == COGL_DRIVER_ID_VULKAN)
+    {
+      cogl_tex = cogl_texture_2d_vk_new_from_dmabuf (context,
+                                                     (int) width,
+                                                     (int) height,
+                                                     cogl_format,
+                                                     drm_format,
+                                                     n_planes,
+                                                     fds,
+                                                     strides,
+                                                     offsets,
+                                                     modifiers,
+                                                     COGL_YUV_MATRIX_BT709,
+                                                     COGL_YUV_RANGE_NARROW,
+                                                     error);
+      if (!cogl_tex)
+        return NULL;
+
+      cogl_fbo = cogl_offscreen_new_with_texture (cogl_tex);
+      g_object_unref (cogl_tex);
+
+      if (!cogl_framebuffer_allocate (COGL_FRAMEBUFFER (cogl_fbo), error))
+        {
+          g_object_unref (cogl_fbo);
+          return NULL;
+        }
+
+      return COGL_FRAMEBUFFER (cogl_fbo);
+    }
+#endif
+
   egl_image = cogl_renderer_egl_create_dmabuf_image (renderer_egl,
                                                      width,
                                                      height,
@@ -705,6 +756,17 @@ cogl_renderer_egl_get_sync_fd (CoglRenderer *renderer)
     cogl_renderer_egl_get_instance_private (renderer_egl);
   int fd;
 
+#ifdef HAVE_VULKAN
+  if (cogl_renderer_get_driver_id (renderer) == COGL_DRIVER_ID_VULKAN)
+    {
+      CoglDriver *driver = cogl_renderer_get_driver (renderer);
+
+      if (COGL_IS_DRIVER_VK (driver))
+        return cogl_driver_vk_get_latest_sync_fd (COGL_DRIVER_VK (driver));
+      return -1;
+    }
+#endif
+
   if (!priv->eglDupNativeFenceFDANDROID)
     return -1;
 
@@ -722,6 +784,12 @@ cogl_renderer_egl_update_sync (CoglRenderer *renderer)
   CoglRendererEGLPrivate *priv =
     cogl_renderer_egl_get_instance_private (renderer_egl);
 
+#ifdef HAVE_VULKAN
+  /* Vulkan framebuffer flush already exported SYNC_FD into the driver. */
+  if (cogl_renderer_get_driver_id (renderer) == COGL_DRIVER_ID_VULKAN)
+    return;
+#endif
+
   if (!priv->eglDestroySyncKHR || !priv->eglCreateSyncKHR)
     return;
 
@@ -731,6 +799,29 @@ cogl_renderer_egl_update_sync (CoglRenderer *renderer)
   priv->sync = priv->eglCreateSyncKHR (priv->edisplay,
                                        EGL_SYNC_NATIVE_FENCE_ANDROID, NULL);
 }
+#else
+#ifdef HAVE_VULKAN
+static int
+cogl_renderer_egl_get_sync_fd (CoglRenderer *renderer)
+{
+  CoglDriver *driver;
+
+  if (cogl_renderer_get_driver_id (renderer) != COGL_DRIVER_ID_VULKAN)
+    return -1;
+
+  driver = cogl_renderer_get_driver (renderer);
+  if (!COGL_IS_DRIVER_VK (driver))
+    return -1;
+
+  return cogl_driver_vk_get_latest_sync_fd (COGL_DRIVER_VK (driver));
+}
+
+static void
+cogl_renderer_egl_update_sync (CoglRenderer *renderer)
+{
+  (void) renderer;
+}
+#endif
 #endif
 
 static void
@@ -752,7 +843,7 @@ cogl_renderer_egl_class_init (CoglRendererEGLClass *class)
     cogl_renderer_egl_query_dma_buf_modifiers;
   renderer_class->is_hardware_accelerated = cogl_renderer_egl_is_hardware_accelerated;
 
-#if defined(EGL_KHR_fence_sync) || defined(EGL_KHR_reusable_sync)
+#if defined(EGL_KHR_fence_sync) || defined(EGL_KHR_reusable_sync) || defined(HAVE_VULKAN)
   renderer_class->get_sync_fd = cogl_renderer_egl_get_sync_fd;
   renderer_class->update_sync = cogl_renderer_egl_update_sync;
 #endif

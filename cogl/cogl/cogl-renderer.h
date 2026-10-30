@@ -77,6 +77,7 @@ cogl_renderer_error_quark (void);
  * @COGL_DRIVER_ID_NOP: A No-Op driver.
  * @COGL_DRIVER_ID_GL3: An OpenGL driver using the core GL 3.1 profile
  * @COGL_DRIVER_ID_GLES2: An OpenGL ES 2.0 driver.
+ * @COGL_DRIVER_ID_VULKAN: Experimental Vulkan driver (opt-in via COGL_DRIVER=vulkan).
  *
  * Identifiers for underlying hardware drivers that may be used by
  * Cogl for rendering.
@@ -87,6 +88,7 @@ typedef enum
   COGL_DRIVER_ID_NOP,
   COGL_DRIVER_ID_GL3,
   COGL_DRIVER_ID_GLES2,
+  COGL_DRIVER_ID_VULKAN,
 } CoglDriverId;
 
 /**
@@ -295,5 +297,19 @@ int cogl_renderer_get_latest_sync_fd (CoglRenderer *renderer);
  */
 COGL_EXPORT CoglRenderDevice *
 cogl_renderer_get_render_device (CoglRenderer *renderer);
+#ifdef HAVE_VULKAN
+/**
+ * cogl_renderer_set_vulkan_drm_fd: (skip)
+ * @renderer: a #CoglRenderer
+ * @drm_fd: DRM device fd used by KMS/GBM, or -1
+ *
+ * Selects the Vulkan physical device matching @drm_fd (same GPU as
+ * the native backend). Must be called before the Cogl context is
+ * created when using %COGL_DRIVER=vulkan.
+ */
+COGL_EXPORT void
+cogl_renderer_set_vulkan_drm_fd (CoglRenderer *renderer,
+                                 int           drm_fd);
+#endif
 
 G_END_DECLS

@@ -66,6 +66,7 @@ _cogl_feature_check (CoglRenderer *renderer,
       g_assert_not_reached ();
     case COGL_DRIVER_ID_NOP:
     case COGL_DRIVER_ID_GL3:
+    case COGL_DRIVER_ID_VULKAN:
       break;
     }
 

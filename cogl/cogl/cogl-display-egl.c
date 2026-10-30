@@ -385,6 +385,15 @@ static gboolean
 cogl_display_egl_setup (CoglDisplay  *display,
                         GError      **error)
 {
+#ifdef HAVE_VULKAN
+  CoglRenderer *renderer = cogl_display_get_renderer (display);
+
+  /* Vulkan owns the GPU device; skip GL EGLContext. GBM/EGL display may
+   * still exist for buffer allocation in the native backend. */
+  if (cogl_renderer_get_driver_id (renderer) == COGL_DRIVER_ID_VULKAN)
+    return TRUE;
+#endif
+
   if (!try_create_context (display, error))
     goto error;
 

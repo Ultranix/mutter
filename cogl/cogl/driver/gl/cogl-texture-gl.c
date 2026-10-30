@@ -110,6 +110,10 @@ cogl_texture_get_gl_texture (CoglTexture *texture,
   if (!leaf)
     return FALSE;
 
+  /* Shared layer hash/equal call this on Vulkan too; don't cast Vk leaves. */
+  if (!COGL_IS_TEXTURE_2D_GL (leaf))
+    return FALSE;
+
   leaf_gl = COGL_TEXTURE_2D_GL (leaf);
 
   if (out_gl_handle)

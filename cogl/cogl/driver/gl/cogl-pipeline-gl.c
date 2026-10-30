@@ -180,9 +180,16 @@ _cogl_pipeline_texture_storage_change_notify (CoglTexture *texture)
 {
   CoglContext *ctx = cogl_texture_get_context (texture);
   CoglDriver *driver = cogl_context_get_driver (ctx);
-  CoglDriverGL *driver_gl = COGL_DRIVER_GL (driver);
-  CoglDriverGLPrivate *priv = cogl_driver_gl_get_private (driver_gl);
+  CoglDriverGL *driver_gl;
+  CoglDriverGLPrivate *priv;
   int i;
+
+  /* GL texture-unit cache only; Vulkan has no CoglDriverGL private. */
+  if (!COGL_IS_DRIVER_GL (driver))
+    return;
+
+  driver_gl = COGL_DRIVER_GL (driver);
+  priv = cogl_driver_gl_get_private (driver_gl);
 
   for (i = 0; i < priv->texture_units->len; i++)
     {
