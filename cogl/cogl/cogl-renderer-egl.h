@@ -410,4 +410,7 @@ gboolean cogl_renderer_egl_choose_config_from_gbm_format (CoglRendererEGL  *rend
                                                           EGLConfig        *out_config,
                                                           GError          **error);
 
+COGL_EXPORT void
+cogl_renderer_egl_init_extensions (CoglRendererEGL *renderer_egl);
+
 G_END_DECLS

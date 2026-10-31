@@ -174,20 +174,12 @@ meta_render_device_gbm_query_drm_modifiers (MetaRenderDevice       *render_devic
   return g_steal_pointer (&modifiers);
 }
 
-static CoglRenderer *
-meta_render_device_gbm_create_renderer (MetaRenderDevice  *render_device,
-                                        GError           **error)
+static gboolean
+initialize_egl_renderer (MetaRenderDeviceGbm  *render_device_gbm,
+                         CoglRendererEGL      *renderer_egl,
+                         GError              **error)
 {
-  MetaRenderDeviceGbm *render_device_gbm =
-    META_RENDER_DEVICE_GBM (render_device);
-  g_autoptr (CoglRenderer) renderer = NULL;
-  CoglRendererEGL *renderer_egl;
   EGLDisplay egl_display;
-
-  renderer = g_object_new (COGL_TYPE_RENDERER_EGL,
-                           "render-device", render_device,
-                           NULL);
-  renderer_egl = COGL_RENDERER_EGL (renderer);
 
   if (!cogl_renderer_egl_has_client_extensions (renderer_egl, NULL,
                                                 "EGL_MESA_platform_gbm",
@@ -199,7 +191,7 @@ meta_render_device_gbm_create_renderer (MetaRenderDevice  *render_device,
       g_set_error (error, G_IO_ERROR,
                    G_IO_ERROR_FAILED,
                    "Missing extension for GBM renderer: EGL_KHR_platform_gbm");
-      return NULL;
+      return FALSE;
     }
 
   egl_display = cogl_renderer_egl_get_platform_display (renderer_egl,
@@ -207,15 +199,46 @@ meta_render_device_gbm_create_renderer (MetaRenderDevice  *render_device,
                                                         render_device_gbm->gbm_device,
                                                         NULL, error);
   if (egl_display == EGL_NO_DISPLAY)
-    return NULL;
+    return FALSE;
 
   if (!cogl_renderer_egl_initialize (renderer_egl, egl_display, error))
     {
       cogl_renderer_egl_terminate (renderer_egl, egl_display, NULL);
-      return NULL;
+      return FALSE;
     }
 
   cogl_renderer_egl_set_edisplay (renderer_egl, egl_display);
+
+  return TRUE;
+}
+
+CoglRendererEGL *
+meta_render_device_gbm_create_egl_renderer (MetaRenderDeviceGbm  *render_device_gbm,
+                                            GError              **error)
+{
+  g_autoptr (CoglRendererEGL) renderer_egl = NULL;
+
+  renderer_egl = g_object_new (COGL_TYPE_RENDERER_EGL,
+                               "render-device", render_device_gbm,
+                               NULL);
+  if (!initialize_egl_renderer (render_device_gbm, renderer_egl, error))
+    return NULL;
+
+  cogl_renderer_egl_init_extensions (renderer_egl);
+  return g_steal_pointer (&renderer_egl);
+}
+
+static CoglRenderer *
+meta_render_device_gbm_create_renderer (MetaRenderDevice  *render_device,
+                                        GError           **error)
+{
+  g_autoptr (CoglRenderer) renderer = NULL;
+
+  renderer = cogl_renderer_new (COGL_RENDER_DEVICE (render_device));
+  if (COGL_IS_RENDERER_EGL (renderer) &&
+      !initialize_egl_renderer (META_RENDER_DEVICE_GBM (render_device),
+                                COGL_RENDERER_EGL (renderer), error))
+    return NULL;
 
   if (!cogl_renderer_connect (renderer, error))
     return NULL;

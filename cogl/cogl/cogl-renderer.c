@@ -32,6 +32,7 @@
 #include "config.h"
 
 #include <gio/gio.h>
+#include <drm_fourcc.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -44,10 +45,11 @@
 #include "cogl/cogl-render-device.h"
 #include "cogl/cogl-renderer.h"
 #include "cogl/cogl-renderer-private.h"
+#include "cogl/cogl-renderer-egl.h"
 #include "cogl/cogl-driver-private.h"
 #include "cogl/driver/nop/cogl-driver-nop-private.h"
 #ifdef HAVE_VULKAN
-#include "cogl/driver/vk/cogl-driver-vk-private.h"
+#include "cogl/driver/vk/cogl-renderer-vk-private.h"
 #endif
 
 
@@ -231,7 +233,13 @@ _cogl_renderer_choose_driver (CoglRenderer  *renderer,
       if (!COGL_RENDERER_GET_CLASS (renderer)->load_driver (renderer,
                                                             driver_override,
                                                             error))
-        return FALSE;
+        {
+          if (error && !*error)
+            g_set_error (error, COGL_RENDERER_ERROR,
+                         COGL_RENDERER_ERROR_BAD_CONSTRAINT,
+                         "Driver \"%s\" is not available", driver_name);
+          return FALSE;
+        }
 
       return TRUE;
     }
@@ -286,7 +294,7 @@ cogl_renderer_get_proc_address (CoglRenderer *renderer,
 {
   CoglRendererClass *class = COGL_RENDERER_GET_CLASS (renderer);
 
-  return class->get_proc_address (renderer, name);
+  return class->get_proc_address ? class->get_proc_address (renderer, name) : NULL;
 }
 
 void
@@ -411,7 +419,8 @@ cogl_renderer_bind_api (CoglRenderer *renderer)
 {
   CoglRendererClass *class = COGL_RENDERER_GET_CLASS (renderer);
 
-  class->bind_api (renderer);
+  if (class->bind_api)
+    class->bind_api (renderer);
 }
 
 CoglDriver *
@@ -453,22 +462,81 @@ cogl_renderer_get_render_device (CoglRenderer *renderer)
 
   return priv->render_device;
 }
-#ifdef HAVE_VULKAN
-void
-cogl_renderer_set_vulkan_drm_fd (CoglRenderer *renderer,
-                                 int           drm_fd)
+
+CoglRenderer *
+cogl_renderer_new (CoglRenderDevice *render_device)
 {
-  CoglDriver *driver;
+  GType renderer_type = COGL_TYPE_RENDERER_EGL;
 
-  g_return_if_fail (COGL_IS_RENDERER (renderer));
+#ifdef HAVE_VULKAN
+  const char *driver_name = g_getenv ("COGL_DRIVER");
 
-  if (cogl_renderer_get_driver_id (renderer) != COGL_DRIVER_ID_VULKAN)
-    return;
-
-  driver = cogl_renderer_get_driver (renderer);
-  if (!COGL_IS_DRIVER_VK (driver))
-    return;
-
-  cogl_driver_vk_set_drm_fd (COGL_DRIVER_VK (driver), drm_fd);
-}
+  if (driver_name && driver_name_to_id (driver_name) == COGL_DRIVER_ID_VULKAN)
+    renderer_type = COGL_TYPE_RENDERER_VK;
 #endif
+
+  return g_object_new (renderer_type,
+                       "render-device", render_device,
+                       NULL);
+}
+
+CoglDisplay *
+cogl_renderer_create_display (CoglRenderer *renderer)
+{
+  return COGL_RENDERER_GET_CLASS (renderer)->create_display (renderer);
+}
+
+gboolean
+cogl_renderer_query_drm_device (CoglRenderer  *renderer,
+                                dev_t         *device_id,
+                                GError       **error)
+{
+  CoglRendererClass *class = COGL_RENDERER_GET_CLASS (renderer);
+
+  if (class->query_drm_device)
+    return class->query_drm_device (renderer, device_id, error);
+
+  g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                       "Renderer has no DRM device");
+  return FALSE;
+}
+
+gboolean
+cogl_renderer_can_import_dma_buf (CoglRenderer *renderer,
+                                  uint32_t      drm_format,
+                                  uint64_t      modifier,
+                                  int           n_planes)
+{
+  CoglRendererClass *class = COGL_RENDERER_GET_CLASS (renderer);
+  g_autoptr (GArray) modifiers = NULL;
+  g_autoptr (GArray) external_only = NULL;
+  unsigned int i;
+
+  if (class->can_import_dma_buf)
+    return class->can_import_dma_buf (renderer, drm_format, modifier, n_planes);
+
+  if (modifier == DRM_FORMAT_MOD_INVALID)
+    {
+      g_autoptr (GArray) formats =
+        g_array_new (FALSE, FALSE, sizeof (uint32_t));
+
+      if (!cogl_renderer_query_dma_buf_formats (renderer, formats, NULL))
+        return FALSE;
+      for (i = 0; i < formats->len; i++)
+        if (g_array_index (formats, uint32_t, i) == drm_format)
+          return TRUE;
+      return FALSE;
+    }
+
+  modifiers = g_array_new (FALSE, FALSE, sizeof (uint64_t));
+  external_only = g_array_new (FALSE, FALSE, sizeof (gboolean));
+  if (!cogl_renderer_query_dma_buf_modifiers (renderer, drm_format,
+                                              modifiers, external_only, NULL))
+    return FALSE;
+
+  for (i = 0; i < modifiers->len; i++)
+    if (g_array_index (modifiers, uint64_t, i) == modifier)
+      return TRUE;
+
+  return FALSE;
+}

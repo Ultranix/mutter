@@ -54,13 +54,11 @@
 #include "backends/native/meta-secondary-gpu-copy-state.h"
 #include "backends/native/meta-egl-gbm.h"
 #include "cogl/cogl.h"
+#include "cogl/winsys/cogl-onscreen-egl-private.h"
 #include "cogl/cogl-context-private.h"
 #include "cogl/cogl-frame-info-private.h"
 #include "cogl/cogl-texture-2d.h"
-#ifdef HAVE_VULKAN
-#include "cogl/driver/vk/cogl-framebuffer-vk-private.h"
-#include "cogl/driver/vk/cogl-driver-vk-private.h"
-#endif
+#include "cogl/cogl-framebuffer-private.h"
 #include "common/meta-cogl-drm-formats.h"
 #include "common/meta-drm-format-helpers.h"
 #include "mtk/mtk.h"
@@ -115,7 +113,7 @@ typedef struct _KmsProperty
 
 struct _MetaOnscreenNative
 {
-  CoglOnscreenEgl parent;
+  CoglOnscreen parent;
 
   MetaRendererNative *renderer_native;
   MetaGpuKms *render_gpu;
@@ -137,6 +135,7 @@ struct _MetaOnscreenNative
 
   struct {
     struct gbm_surface *surface;
+    EGLSurface egl_surface;
 
     struct {
       struct gbm_bo *gbm;
@@ -168,7 +167,7 @@ struct _MetaOnscreenNative
 };
 
 G_DEFINE_TYPE (MetaOnscreenNative, meta_onscreen_native,
-               COGL_TYPE_ONSCREEN_EGL)
+               COGL_TYPE_ONSCREEN)
 
 static void
 maybe_post_next_frame (CoglOnscreen *onscreen);
@@ -1011,9 +1010,8 @@ copy_shared_framebuffer_gpu (CoglOnscreen                         *onscreen,
   CoglDisplay *cogl_display = cogl_context_get_display (cogl_context);
   MetaRendererNativeSecondaryGpuData *secondary_gpu_data =
     meta_render_device_get_secondary_gpu_data (render_device);
-  CoglRenderer *renderer =
-    cogl_render_device_get_renderer (COGL_RENDER_DEVICE (render_device));
-  CoglRendererEGL *renderer_egl = COGL_RENDERER_EGL (renderer);
+  CoglRendererEGL *renderer_egl = secondary_gpu_data->renderer_egl;
+  CoglRenderer *renderer = COGL_RENDERER (renderer_egl);
   MetaDrmBufferGbm *dst_buffer_gbm = NULL, *src_buffer_gbm;
   struct gbm_bo *dst_bo, *src_bo;
   EGLSync egl_sync = EGL_NO_SYNC;
@@ -1026,8 +1024,7 @@ copy_shared_framebuffer_gpu (CoglOnscreen                         *onscreen,
   COGL_TRACE_BEGIN_SCOPED (CopySharedFramebufferSecondaryGpu,
                            "copy_shared_framebuffer_gpu()");
 
-  if (secondary_gpu_data->is_nvidia)
-    sync_fd = meta_frame_native_steal_sync_fd (frame_native);
+  sync_fd = meta_frame_native_steal_sync_fd (frame_native);
 
   if (!cogl_renderer_egl_make_current (renderer_egl,
                                        EGL_NO_SURFACE,
@@ -1139,7 +1136,7 @@ done:
         g_warning ("Failed to destroy secondary GPU EGLSync: %s", local_error->message);
     }
 
-  cogl_display_egl_ensure_current (COGL_DISPLAY_EGL (cogl_display));
+  cogl_display_ensure_current (cogl_display);
 
   if (!buffer_copied)
     g_clear_object (&dst_buffer_gbm);
@@ -1545,13 +1542,12 @@ meta_onscreen_native_queue_damage_region (CoglOnscreen    *onscreen,
                                           const MtkRegion *region)
 {
   MetaOnscreenNative *onscreen_native = META_ONSCREEN_NATIVE (onscreen);
-  CoglOnscreenClass *parent_class =
-    COGL_ONSCREEN_CLASS (meta_onscreen_native_parent_class);
 
   if (!onscreen_native->gbm.surface)
     return;
 
-  parent_class->queue_damage_region (onscreen, region);
+  cogl_onscreen_egl_queue_damage_region_surface (
+    onscreen, onscreen_native->gbm.egl_surface, region);
 }
 
 static gboolean
@@ -1564,13 +1560,12 @@ swap_buffers_with_damage (CoglOnscreen    *onscreen,
 
   if (onscreen_native->gbm.surface)
     {
-      CoglOnscreenClass *parent_class =
-        COGL_ONSCREEN_CLASS (meta_onscreen_native_parent_class);
 
-      return parent_class->swap_buffers_with_damage (onscreen,
-                                                     region,
-                                                     frame_info,
-                                                     user_data);
+      return cogl_onscreen_egl_swap_buffers_with_damage_surface (onscreen,
+                                                                 onscreen_native->gbm.egl_surface,
+                                                                 region,
+                                                                 frame_info,
+                                                                 user_data);
     }
   else
     {
@@ -1579,11 +1574,9 @@ swap_buffers_with_damage (CoglOnscreen    *onscreen,
 
       /* Update latest sync object */
       cogl_framebuffer_flush (framebuffer);
-#ifdef HAVE_VULKAN
       {
         CoglContext *context = cogl_framebuffer_get_context (framebuffer);
-        if (cogl_renderer_get_driver_id (cogl_context_get_renderer (context)) ==
-            COGL_DRIVER_ID_VULKAN && cogl_context_vk_consume_frame_error (context))
+        if (cogl_context_consume_frame_error (context))
           {
             for (i = 0; i < G_N_ELEMENTS (onscreen_native->gbm.bos); i++)
               onscreen_native->gbm.bos[i].age = 0;
@@ -1596,7 +1589,7 @@ swap_buffers_with_damage (CoglOnscreen    *onscreen,
             return FALSE;
           }
       }
-#endif
+
 
       for (i = 0; i < G_N_ELEMENTS (onscreen_native->gbm.bos); i++)
         {
@@ -1716,10 +1709,9 @@ meta_onscreen_native_swap_region (CoglOnscreen    *onscreen,
 
   if (onscreen_native->gbm.surface)
     {
-      CoglOnscreenClass *parent_class =
-        COGL_ONSCREEN_CLASS (meta_onscreen_native_parent_class);
 
-      return parent_class->swap_region (onscreen, region, frame_info, user_data);
+      return cogl_onscreen_egl_swap_region_surface (
+        onscreen, onscreen_native->gbm.egl_surface, region, frame_info, user_data);
     }
 
   /* GBM FBO/BO path has no EGLSurface; reuse the damage swap path that
@@ -2229,12 +2221,9 @@ meta_onscreen_native_get_bind_buffer (CoglFramebuffer *framebuffer)
     return framebuffer;
 
   ensure_back_bo (onscreen_native);
-#ifdef HAVE_VULKAN
-  if (cogl_renderer_get_driver_id (cogl_context_get_renderer (
-                                     cogl_framebuffer_get_context (framebuffer))) == COGL_DRIVER_ID_VULKAN)
-    cogl_framebuffer_vk_adopt_onscreen_targets (
-      framebuffer, COGL_FRAMEBUFFER (onscreen_native->gbm.back->cogl_fbo));
-#endif
+  cogl_framebuffer_adopt_targets (
+    framebuffer, COGL_FRAMEBUFFER (onscreen_native->gbm.back->cogl_fbo));
+
   return COGL_FRAMEBUFFER (onscreen_native->gbm.back->cogl_fbo);
 }
 
@@ -2247,10 +2236,9 @@ meta_onscreen_native_get_buffer_age (CoglOnscreen *onscreen)
 
   if (onscreen_native->gbm.surface)
     {
-      CoglOnscreenClass *parent_class =
-        COGL_ONSCREEN_CLASS (meta_onscreen_native_parent_class);
 
-      return parent_class->get_buffer_age (onscreen);
+      return cogl_onscreen_egl_get_buffer_age_surface (
+        onscreen, onscreen_native->gbm.egl_surface);
     }
 
   ensure_back_bo (onscreen_native);
@@ -2266,8 +2254,12 @@ meta_onscreen_native_get_window_handles (CoglOnscreen *onscreen,
   CoglFramebuffer *framebuffer = COGL_FRAMEBUFFER (onscreen);
   CoglContext *cogl_context = cogl_framebuffer_get_context (framebuffer);
   CoglDisplay *cogl_display = cogl_context_get_display (cogl_context);
-  CoglDisplayEGL *cogl_display_egl = COGL_DISPLAY_EGL (cogl_display);
+  CoglDisplayEGL *cogl_display_egl;
 
+  if (!COGL_IS_DISPLAY_EGL (cogl_display))
+    return FALSE;
+
+  cogl_display_egl = COGL_DISPLAY_EGL (cogl_display);
   *device_out = cogl_display_egl_get_egl_context (cogl_display_egl);
   *window_out = onscreen_native;
   return TRUE;
@@ -2836,7 +2828,6 @@ create_bos_gbm_attempt (CoglOnscreen *onscreen,
   struct gbm_device *gbm_device;
   MetaDeviceFile *device_file;
   gboolean should_be_sharable;
-  const MetaFormatInfo *format_info;
   GArray *modifiers = NULL;
   uint32_t gbm_format = 0;
   int i;
@@ -2872,7 +2863,6 @@ create_bos_gbm_attempt (CoglOnscreen *onscreen,
   if (force_linear)
     gbm_flags |= GBM_BO_USE_LINEAR;
 
-  format_info = meta_format_info_from_drm_format (gbm_format);
   render_device = meta_renderer_native_get_render_device (renderer_native,
                                                           onscreen_native->render_gpu);
   device_file = meta_render_device_get_device_file (render_device);
@@ -2882,36 +2872,11 @@ create_bos_gbm_attempt (CoglOnscreen *onscreen,
   if (meta_renderer_native_use_modifiers (renderer_native) && !force_linear)
     modifiers = get_modifiers (onscreen, gbm_format, should_be_sharable);
 
-#ifdef HAVE_VULKAN
-  if (cogl_renderer_get_driver_id (cogl_renderer) == COGL_DRIVER_ID_VULKAN)
-    {
-      if (modifiers)
-        {
-          for (guint m = 0; m < modifiers->len;)
-            {
-              uint64_t modifier = g_array_index (modifiers, uint64_t, m);
-              if (!cogl_context_vk_supports_dma_buf (cogl_context, gbm_format,
-                                                     modifier, NULL))
-                g_array_remove_index (modifiers, m);
-              else
-                m++;
-            }
-          if (modifiers->len == 0)
-            g_clear_pointer (&modifiers, g_array_unref);
-        }
-      if (!modifiers)
-        {
-          if (!cogl_context_vk_supports_dma_buf (cogl_context, gbm_format,
-                                                 DRM_FORMAT_MOD_LINEAR, NULL))
-            {
-              g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
-                                   "No compatible Vulkan output layout");
-              return FALSE;
-            }
-          gbm_flags |= GBM_BO_USE_LINEAR;
-        }
-    }
-#endif
+  if (!modifiers &&
+      cogl_renderer_has_feature (cogl_renderer,
+                                 COGL_RENDERER_FEATURE_OFFSCREEN_ONLY))
+    gbm_flags |= GBM_BO_USE_LINEAR;
+
 
   if (modifiers)
     {
@@ -2958,7 +2923,6 @@ create_bos_gbm_attempt (CoglOnscreen *onscreen,
 
       for (i = 0; i < num_bos; i++)
         {
-          struct gbm_bo *bo;
 
           onscreen_native->gbm.bos[i].buffer_gbm =
             meta_drm_buffer_gbm_new_take (device_file,
@@ -2968,7 +2932,6 @@ create_bos_gbm_attempt (CoglOnscreen *onscreen,
           if (!onscreen_native->gbm.bos[i].buffer_gbm)
             break;
 
-          bo = meta_drm_buffer_gbm_get_bo (onscreen_native->gbm.bos[i].buffer_gbm);
           /* Ownership moved into buffer_gbm; clear the raw pointer slot. */
           onscreen_native->gbm.bos[i].gbm = NULL;
 
@@ -2981,90 +2944,11 @@ create_bos_gbm_attempt (CoglOnscreen *onscreen,
                 break;
             }
 
-#ifdef HAVE_VULKAN
-          if (cogl_renderer_get_driver_id (cogl_renderer) ==
-              COGL_DRIVER_ID_VULKAN)
-            {
-              uint32_t n_planes = gbm_bo_get_plane_count (bo);
-              uint32_t strides[4];
-              uint32_t offsets[4];
-              uint64_t plane_modifiers[4];
-              int fds[4] = { -1, -1, -1, -1 };
-              uint32_t p;
-              gboolean use_modifiers;
-
-              if (n_planes == 0 || n_planes > G_N_ELEMENTS (fds))
-                {
-                  g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
-                               "Unsupported GBM plane count: %u", n_planes);
-                  break;
-                }
-
-              for (p = 0; p < n_planes; p++)
-                {
-                  fds[p] = gbm_bo_get_fd_for_plane (bo, p);
-                  if (fds[p] < 0)
-                    {
-                      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
-                                   "Failed to export GBM plane %u: %s",
-                                   p, g_strerror (errno));
-                      break;
-                    }
-                  strides[p] = gbm_bo_get_stride_for_plane (bo, p);
-                  offsets[p] = gbm_bo_get_offset (bo, p);
-                  plane_modifiers[p] = gbm_bo_get_modifier (bo);
-                }
-              if (p < n_planes)
-                {
-                  for (uint32_t j = 0; j < p; j++)
-                    close (fds[j]);
-                  break;
-                }
-
-              use_modifiers =
-                !(plane_modifiers[0] == DRM_FORMAT_MOD_LINEAR ||
-                  plane_modifiers[0] == DRM_FORMAT_MOD_INVALID);
-
-              onscreen_native->gbm.bos[i].cogl_tex =
-                cogl_texture_2d_new_from_dma_buf (cogl_context,
-                                                  width, height,
-                                                  format_info->cogl_format,
-                                                  gbm_format,
-                                                  (int) n_planes,
-                                                  fds,
-                                                  strides,
-                                                  offsets,
-                                                  use_modifiers
-                                                  ? plane_modifiers : NULL,
-                                                  error);
-              for (p = 0; p < n_planes; p++)
-                close (fds[p]);
-              if (!onscreen_native->gbm.bos[i].cogl_tex)
-                break;
-            }
-          else
-#endif
-          {
-            EGLImageKHR egl_image;
-
-            egl_image =
-              meta_egl_ensure_gbm_bo_egl_image (COGL_RENDERER_EGL (cogl_renderer),
-                                                bo,
-                                                META_EGL_GPU_PRIMARY,
-                                                error);
-            if (egl_image == EGL_NO_IMAGE_KHR)
-              break;
-
-            onscreen_native->gbm.bos[i].cogl_tex =
-              cogl_texture_2d_new_from_egl_image (cogl_context,
-                                                  width, height,
-                                                  format_info->cogl_format,
-                                                  egl_image,
-                                                  COGL_EGL_IMAGE_FLAG_NO_GET_DATA,
-                                                  error);
-            if (!onscreen_native->gbm.bos[i].cogl_tex)
-              break;
-          }
+          onscreen_native->gbm.bos[i].cogl_tex =
+            meta_drm_buffer_gbm_import_texture (
+              onscreen_native->gbm.bos[i].buffer_gbm, cogl_context, error);
+          if (!onscreen_native->gbm.bos[i].cogl_tex)
+            break;
 
           onscreen_native->gbm.bos[i].cogl_fbo =
             cogl_offscreen_new_with_texture (onscreen_native->gbm.bos[i].cogl_tex);
@@ -3101,14 +2985,11 @@ create_bos_gbm (CoglOnscreen *onscreen,
                 int           height,
                 GError      **error)
 {
-#ifdef HAVE_VULKAN
   CoglContext *context = cogl_framebuffer_get_context (COGL_FRAMEBUFFER (onscreen));
-  if (cogl_renderer_get_driver_id (cogl_context_get_renderer (context)) ==
-      COGL_DRIVER_ID_VULKAN)
+  if (cogl_renderer_has_feature (cogl_context_get_renderer (context),
+                                 COGL_RENDERER_FEATURE_OFFSCREEN_ONLY))
     {
-      /* Vulkan color attachments require identity component mappings.
-       * The other packed RGB orders are supported for sampling via view
-       * swizzles, but cannot be used as scanout render targets directly. */
+      /* Prefer higher precision formats before falling back to 8-bit RGB. */
       const uint32_t formats[] = {
         GBM_FORMAT_XRGB2101010,
         GBM_FORMAT_XBGR2101010,
@@ -3133,14 +3014,13 @@ create_bos_gbm (CoglOnscreen *onscreen,
                                         &local_error))
               return TRUE;
             meta_topic (META_DEBUG_KMS,
-                        "Vulkan output format 0x%x linear=%d: %s",
+                        "Output format 0x%x linear=%d: %s",
                         formats[i], linear,
                         local_error ? local_error->message : "allocation failed");
           }
       g_propagate_error (error, g_steal_pointer (&local_error));
       return FALSE;
     }
-#endif
   return create_bos_gbm_attempt (onscreen, width, height, 0, FALSE, error);
 }
 
@@ -3273,15 +3153,10 @@ should_try_fbos (CoglOnscreen *onscreen)
   gboolean is_nvidia, has_partial_updates;
   const char *use_fbos;
 
-#ifdef HAVE_VULKAN
-  /* Vulkan has no EGLSurface draw path; always use GBM BO → dmabuf import. */
-  if (cogl_renderer_get_driver_id (renderer) == COGL_DRIVER_ID_VULKAN)
-    {
-      meta_topic (META_DEBUG_KMS,
-                  "Trying FBO path because COGL_DRIVER=vulkan");
-      return TRUE;
-    }
-#endif
+  if (cogl_renderer_has_feature (renderer,
+                                 COGL_RENDERER_FEATURE_OFFSCREEN_ONLY))
+    return TRUE;
+
 
   use_fbos = getenv ("MUTTER_DEBUG_USE_FBOS");
   if (use_fbos)
@@ -3339,7 +3214,6 @@ meta_onscreen_native_allocate (CoglFramebuffer  *framebuffer,
 {
   CoglOnscreen *onscreen = COGL_ONSCREEN (framebuffer);
   MetaOnscreenNative *onscreen_native = META_ONSCREEN_NATIVE (onscreen);
-  CoglOnscreenEgl *onscreen_egl = COGL_ONSCREEN_EGL (onscreen);
   MetaRenderDevice *render_device;
   struct gbm_surface *gbm_surface;
   EGLSurface egl_surface;
@@ -3381,20 +3255,19 @@ meta_onscreen_native_allocate (CoglFramebuffer  *framebuffer,
 
       if (create_surfaces)
         {
-#ifdef HAVE_VULKAN
           CoglContext *cogl_context =
             cogl_framebuffer_get_context (framebuffer);
 
-          if (cogl_renderer_get_driver_id (
-                cogl_context_get_renderer (cogl_context)) ==
-              COGL_DRIVER_ID_VULKAN)
+          if (cogl_renderer_has_feature (
+                cogl_context_get_renderer (cogl_context),
+                COGL_RENDERER_FEATURE_OFFSCREEN_ONLY))
             {
-              g_set_error (error, COGL_WINSYS_ERROR,
-                           COGL_WINSYS_ERROR_CREATE_ONSCREEN,
-                           "Vulkan requires GBM BO FBO path; EGLSurface fallback unavailable");
+              g_set_error_literal (error, COGL_WINSYS_ERROR,
+                                   COGL_WINSYS_ERROR_CREATE_ONSCREEN,
+                                   "Renderer requires DMA buffer framebuffers");
               return FALSE;
             }
-#endif
+
           if (!create_surfaces_gbm (onscreen,
                                     width, height,
                                     &gbm_surface,
@@ -3403,7 +3276,7 @@ meta_onscreen_native_allocate (CoglFramebuffer  *framebuffer,
             return FALSE;
 
           onscreen_native->gbm.surface = gbm_surface;
-          cogl_onscreen_egl_set_egl_surface (onscreen_egl, egl_surface);
+          onscreen_native->gbm.egl_surface = egl_surface;
           maybe_init_render_source (onscreen_native);
         }
       break;
@@ -3655,18 +3528,18 @@ pick_secondary_gpu_framebuffer_format_for_cpu (CoglOnscreen *onscreen)
    * alpha channel ignored.
    */
   static const uint32_t preferred_formats[] =
-    {
-      /*
-       * DRM_FORMAT_XBGR8888 a.k.a GL_RGBA, GL_UNSIGNED_BYTE on
-       * little-endian is possibly the most optimized glReadPixels
-       * output format. glReadPixels cannot avoid manufacturing an alpha
-       * channel if the render buffer does not have one and converting
-       * to ABGR8888 may be more optimized than ARGB8888.
-       */
-      DRM_FORMAT_XBGR8888,
-      /* The rest are other fairly commonly used formats in OpenGL. */
-      DRM_FORMAT_XRGB8888,
-    };
+  {
+    /*
+     * DRM_FORMAT_XBGR8888 a.k.a GL_RGBA, GL_UNSIGNED_BYTE on
+     * little-endian is possibly the most optimized glReadPixels
+     * output format. glReadPixels cannot avoid manufacturing an alpha
+     * channel if the render buffer does not have one and converting
+     * to ABGR8888 may be more optimized than ARGB8888.
+     */
+    DRM_FORMAT_XBGR8888,
+    /* The rest are other fairly commonly used formats in OpenGL. */
+    DRM_FORMAT_XRGB8888,
+  };
   g_autoptr (GArray) formats = NULL;
   size_t k;
   unsigned int i;
@@ -3971,6 +3844,13 @@ meta_onscreen_native_dispose (GObject *object)
       break;
     }
 
+  if (onscreen_native->gbm.egl_surface != EGL_NO_SURFACE)
+    {
+      cogl_onscreen_egl_destroy_surface (onscreen,
+                                         onscreen_native->gbm.egl_surface);
+      onscreen_native->gbm.egl_surface = EGL_NO_SURFACE;
+    }
+
   G_OBJECT_CLASS (meta_onscreen_native_parent_class)->dispose (object);
 
   g_clear_pointer (&onscreen_native->gbm.surface, gbm_surface_destroy);
@@ -3987,6 +3867,26 @@ meta_onscreen_native_init (MetaOnscreenNative *onscreen_native)
 }
 
 static void
+meta_onscreen_native_bind (CoglOnscreen *onscreen)
+{
+  MetaOnscreenNative *onscreen_native = META_ONSCREEN_NATIVE (onscreen);
+  CoglContext *context =
+    cogl_framebuffer_get_context (COGL_FRAMEBUFFER (onscreen));
+  CoglDisplay *display = cogl_context_get_display (context);
+
+  if (onscreen_native->gbm.egl_surface != EGL_NO_SURFACE)
+    cogl_onscreen_egl_bind_surface (
+      onscreen, onscreen_native->gbm.egl_surface,
+      cogl_display_egl_get_egl_context (COGL_DISPLAY_EGL (display)));
+}
+
+EGLSurface
+meta_onscreen_native_get_egl_surface (MetaOnscreenNative *onscreen_native)
+{
+  return onscreen_native->gbm.egl_surface;
+}
+
+static void
 meta_onscreen_native_class_init (MetaOnscreenNativeClass *klass)
 {
   GObjectClass *object_class = G_OBJECT_CLASS (klass);
@@ -3999,6 +3899,7 @@ meta_onscreen_native_class_init (MetaOnscreenNativeClass *klass)
   framebuffer_class->get_bind_buffer = meta_onscreen_native_get_bind_buffer;
   framebuffer_class->is_y_flipped = meta_onscreen_native_is_y_flipped;
 
+  onscreen_class->bind = meta_onscreen_native_bind;
   onscreen_class->queue_damage_region =
     meta_onscreen_native_queue_damage_region;
   onscreen_class->swap_buffers_with_damage =

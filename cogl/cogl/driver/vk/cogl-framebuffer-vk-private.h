@@ -45,12 +45,6 @@ void cogl_framebuffer_vk_replace_color_image (CoglFramebufferVk   *fb,
 void cogl_framebuffer_vk_adopt_targets_from (CoglFramebufferVk *dst,
                                              CoglFramebufferVk *src);
 
-/* Mutter-facing: resolve FB drivers then adopt (symbols stay inside libcogl).
- */
-COGL_EXPORT void
-cogl_framebuffer_vk_adopt_onscreen_targets (CoglFramebuffer *dst_fb,
-                                            CoglFramebuffer *src_fb);
-
 /* Draw attachment DS (packed / depth-only / stencil-only). */
 CoglVkImage * cogl_framebuffer_vk_peek_depth_stencil (CoglFramebufferVk *fb);
 
@@ -61,18 +55,6 @@ void cogl_framebuffer_vk_apply_driver_config (CoglFramebufferVk                 
 
 /* MS color (if any) + matching-sample DS; returns draw color target. */
 CoglVkImage * cogl_framebuffer_vk_prepare_draw_targets (CoglFramebufferVk *fb);
-
-/* True VK blit/copy (not glBlitFramebuffer). */
-gboolean cogl_framebuffer_vk_blit_box (CoglFramebuffer *src_fb,
-                                       CoglFramebuffer *dst_fb,
-                                       int              src_x1,
-                                       int              src_y1,
-                                       int              src_x2,
-                                       int              src_y2,
-                                       int              dst_x1,
-                                       int              dst_y1,
-                                       int              dst_x2,
-                                       int              dst_y2);
 
 COGL_EXPORT void cogl_framebuffer_vk_peek_depth_stencil_images (CoglFramebufferVk *fb,
                                                                 CoglVkImage      **depth,

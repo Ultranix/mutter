@@ -113,6 +113,7 @@ free_gbm_bo_egl_image (void *data)
       g_warning ("Could not destroy EGLImage attached to GBM BO: %s", error->message);
     }
 
+  g_clear_object (&user_data->renderer_egl);
   g_free (data);
 }
 
@@ -159,7 +160,7 @@ meta_egl_ensure_gbm_bo_egl_image (CoglRendererEGL  *renderer_egl,
         return EGL_NO_IMAGE;
 
       bo_user_data = g_new0 (GbmBoUserData, 1);
-      bo_user_data->renderer_egl = renderer_egl;
+      bo_user_data->renderer_egl = g_object_ref (renderer_egl);
       bo_user_data->egl_image = egl_image;
 
       bo_user_datas[gpu_slot] = bo_user_data;

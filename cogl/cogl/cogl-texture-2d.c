@@ -42,6 +42,7 @@
 
 #include <string.h>
 #include <math.h>
+#include <unistd.h>
 
 G_DEFINE_ABSTRACT_TYPE (CoglTexture2D, cogl_texture_2d, COGL_TYPE_TEXTURE)
 
@@ -268,13 +269,13 @@ cogl_texture_2d_new_from_bitmap (CoglBitmap *bmp)
 }
 
 CoglTexture *
-cogl_texture_2d_new_from_data (CoglContext *ctx,
-                               int width,
-                               int height,
+cogl_texture_2d_new_from_data (CoglContext    *ctx,
+                               int             width,
+                               int             height,
                                CoglPixelFormat format,
-                               int rowstride,
-                               const uint8_t *data,
-                               GError **error)
+                               int             rowstride,
+                               const uint8_t  *data,
+                               GError        **error)
 {
   CoglBitmap *bmp;
   CoglTexture *tex_2d;
@@ -308,10 +309,6 @@ cogl_texture_2d_new_from_data (CoglContext *ctx,
   return tex_2d;
 }
 
-#ifdef HAVE_VULKAN
-#include "cogl/driver/vk/cogl-texture-driver-vk-private.h"
-#include <unistd.h>
-
 CoglTexture *
 cogl_texture_2d_new_from_dma_buf (CoglContext     *ctx,
                                   int              width,
@@ -325,11 +322,11 @@ cogl_texture_2d_new_from_dma_buf (CoglContext     *ctx,
                                   const uint64_t  *modifiers,
                                   GError         **error)
 {
-  return cogl_texture_2d_vk_new_from_dmabuf (ctx, width, height, format,
-                                             drm_fourcc, n_planes,
-                                             fds, strides, offsets, modifiers,
-                                             COGL_YUV_MATRIX_BT709,
-                                             COGL_YUV_RANGE_NARROW, error);
+  return cogl_texture_2d_new_from_dma_buf_with_colorimetry (ctx, width, height, format,
+                                                            drm_fourcc, n_planes,
+                                                            fds, strides, offsets, modifiers,
+                                                            COGL_YUV_MATRIX_BT709,
+                                                            COGL_YUV_RANGE_NARROW, error);
 }
 
 CoglTexture *
@@ -347,8 +344,19 @@ cogl_texture_2d_new_from_dma_buf_with_colorimetry (CoglContext     *ctx,
                                                    CoglYuvRange     range,
                                                    GError         **error)
 {
-  return cogl_texture_2d_vk_new_from_dmabuf (ctx, width, height, format,
-                                             drm_fourcc, n_planes,
+  g_autoptr (CoglTextureDriver) texture_driver =
+    cogl_driver_create_texture_driver (cogl_context_get_driver (ctx));
+  CoglTextureDriverClass *class = COGL_TEXTURE_DRIVER_GET_CLASS (texture_driver);
+
+  if (!class->texture_2d_new_from_dma_buf)
+    {
+      g_set_error_literal (error, COGL_SYSTEM_ERROR, COGL_SYSTEM_ERROR_UNSUPPORTED,
+                           "DMA buffer import is not supported");
+      return NULL;
+    }
+
+  return class->texture_2d_new_from_dma_buf (texture_driver, ctx, width, height,
+                                             format, drm_fourcc, n_planes,
                                              fds, strides, offsets, modifiers,
                                              matrix, range, error);
 }
@@ -359,33 +367,40 @@ cogl_texture_2d_set_yuv_colorimetry (CoglTexture  *texture,
                                      CoglYuvRange  range,
                                      GError      **error)
 {
-  if (!COGL_IS_TEXTURE_2D_VK (texture))
+  CoglTexture2DClass *class;
+
+  g_return_val_if_fail (COGL_IS_TEXTURE_2D (texture), FALSE);
+  class = COGL_TEXTURE_2D_GET_CLASS (texture);
+  if (!class->set_yuv_colorimetry)
     {
       g_set_error_literal (error, COGL_SYSTEM_ERROR, COGL_SYSTEM_ERROR_UNSUPPORTED,
-                           "Whole-image YUV colorimetry requires a Vulkan texture");
+                           "Texture colorimetry updates are not supported");
       return FALSE;
     }
-  return cogl_texture_2d_vk_set_yuv_colorimetry (COGL_TEXTURE_2D_VK (texture),
-                                                 matrix, range, error);
+
+  return class->set_yuv_colorimetry (COGL_TEXTURE_2D (texture),
+                                     matrix, range, error);
 }
 
 void
 cogl_texture_2d_set_acquire_sync_fd (CoglTexture *texture,
                                      int          sync_fd)
 {
-  if (!texture || !COGL_IS_TEXTURE_2D_VK (texture))
+  CoglTexture2DClass *class;
+
+  if (COGL_IS_TEXTURE_2D (texture))
     {
-      if (sync_fd >= 0)
+      class = COGL_TEXTURE_2D_GET_CLASS (texture);
+      if (class->set_acquire_sync_fd)
         {
-          close (sync_fd);
+          class->set_acquire_sync_fd (COGL_TEXTURE_2D (texture), sync_fd);
+          return;
         }
-      return;
     }
 
-  cogl_texture_2d_vk_set_acquire_sync_fd (COGL_TEXTURE_2D_VK (texture),
-                                          sync_fd);
+  if (sync_fd >= 0)
+    close (sync_fd);
 }
-#endif
 
 void
 _cogl_texture_2d_externally_modified (CoglTexture *texture)
@@ -394,4 +409,11 @@ _cogl_texture_2d_externally_modified (CoglTexture *texture)
     return;
 
   COGL_TEXTURE_2D (texture)->mipmaps_dirty = TRUE;
+}
+
+gboolean
+cogl_texture_2d_handles_acquire_sync_fd (CoglTexture *texture)
+{
+  return COGL_IS_TEXTURE_2D (texture) &&
+         COGL_TEXTURE_2D_GET_CLASS (texture)->set_acquire_sync_fd != NULL;
 }

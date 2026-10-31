@@ -2356,6 +2356,23 @@ cogl_texture_2d_vk_get_data (CoglTexture     *tex,
   return TRUE;
 }
 
+static gboolean
+cogl_texture_2d_vk_update_colorimetry (CoglTexture2D  *texture,
+                                       CoglYuvMatrix   matrix,
+                                       CoglYuvRange    range,
+                                       GError        **error)
+{
+  return cogl_texture_2d_vk_set_yuv_colorimetry (COGL_TEXTURE_2D_VK (texture),
+                                                 matrix, range, error);
+}
+
+static void
+cogl_texture_2d_vk_set_acquire_fence (CoglTexture2D *texture,
+                                      int            sync_fd)
+{
+  cogl_texture_2d_vk_set_acquire_sync_fd (COGL_TEXTURE_2D_VK (texture), sync_fd);
+}
+
 static void
 cogl_texture_2d_vk_class_init (CoglTexture2DVkClass *klass)
 {
@@ -2367,6 +2384,8 @@ cogl_texture_2d_vk_class_init (CoglTexture2DVkClass *klass)
   tex_klass->allocate = cogl_texture_2d_vk_allocate;
   tex_klass->get_data = cogl_texture_2d_vk_get_data;
   tex_klass->pre_paint = cogl_texture_2d_vk_pre_paint;
+  tex_2d_klass->set_yuv_colorimetry = cogl_texture_2d_vk_update_colorimetry;
+  tex_2d_klass->set_acquire_sync_fd = cogl_texture_2d_vk_set_acquire_fence;
   tex_2d_klass->generate_mipmap = cogl_texture_2d_vk_generate_mipmap;
   tex_2d_klass->copy_from_framebuffer = cogl_texture_2d_vk_copy_from_framebuffer;
   tex_2d_klass->copy_from_bitmap = cogl_texture_2d_vk_copy_from_bitmap;
@@ -2587,14 +2606,16 @@ cogl_texture_driver_vk_texture_2d_can_create (CoglTextureDriver *driver,
                                               int                height,
                                               CoglPixelFormat    internal_format)
 {
-  (void) driver;
-  (void) ctx;
-  (void) width;
-  (void) height;
+  CoglDriverVk *driver_vk =
+    COGL_DRIVER_VK (cogl_texture_driver_get_driver (driver));
+  CoglVkDevice *device = cogl_driver_vk_peek_device (driver_vk);
 
-  return cogl_vk_format_from_cogl (internal_format) != VK_FORMAT_UNDEFINED ||
-         internal_format == COGL_PIXEL_FORMAT_RGBA_8888_PRE ||
-         internal_format == COGL_PIXEL_FORMAT_RGBA_8888;
+  if (width <= 0 || height <= 0 ||
+      width > device->limits.maxImageDimension2D ||
+      height > device->limits.maxImageDimension2D)
+    return FALSE;
+
+  return cogl_vk_format_from_cogl (internal_format) != VK_FORMAT_UNDEFINED;
 }
 
 static CoglPixelFormat
@@ -2625,11 +2646,35 @@ cogl_texture_2d_vk_resolve (CoglTexture *tex)
   return NULL;
 }
 
+static CoglTexture *
+cogl_texture_driver_vk_import_dma_buf (CoglTextureDriver *driver,
+                                       CoglContext       *context,
+                                       int                width,
+                                       int                height,
+                                       CoglPixelFormat    format,
+                                       uint32_t           drm_format,
+                                       int                n_planes,
+                                       const int         *fds,
+                                       const uint32_t    *strides,
+                                       const uint32_t    *offsets,
+                                       const uint64_t    *modifiers,
+                                       CoglYuvMatrix      matrix,
+                                       CoglYuvRange       range,
+                                       GError           **error)
+{
+  return cogl_texture_2d_vk_new_from_dmabuf (context, width, height, format,
+                                             drm_format, n_planes, fds,
+                                             strides, offsets, modifiers,
+                                             matrix, range, error);
+}
+
 static void
 cogl_texture_driver_vk_class_init (CoglTextureDriverVkClass *klass)
 {
   CoglTextureDriverClass *driver_klass = COGL_TEXTURE_DRIVER_CLASS (klass);
 
+  driver_klass->texture_2d_new_from_dma_buf =
+    cogl_texture_driver_vk_import_dma_buf;
   driver_klass->texture_2d_get_type = cogl_texture_driver_vk_texture_2d_get_type;
   driver_klass->texture_2d_can_create = cogl_texture_driver_vk_texture_2d_can_create;
   driver_klass->find_best_get_data_format =

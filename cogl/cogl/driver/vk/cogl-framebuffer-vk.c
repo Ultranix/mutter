@@ -221,24 +221,14 @@ cogl_framebuffer_vk_adopt_targets_from (CoglFramebufferVk *dst,
   attach_ds_to_color_targets (dst);
 }
 
-void
-cogl_framebuffer_vk_adopt_onscreen_targets (CoglFramebuffer *dst_fb,
-                                            CoglFramebuffer *src_fb)
+static void
+cogl_framebuffer_vk_adopt_targets (CoglFramebufferDriver *driver,
+                                   CoglFramebufferDriver *source)
 {
-  CoglFramebufferDriver *dst_drv;
-  CoglFramebufferDriver *src_drv;
+  g_return_if_fail (COGL_IS_FRAMEBUFFER_DRIVER_VK (source));
 
-  g_return_if_fail (COGL_IS_FRAMEBUFFER (dst_fb));
-  g_return_if_fail (COGL_IS_FRAMEBUFFER (src_fb));
-
-  dst_drv = cogl_framebuffer_get_driver (dst_fb);
-  src_drv = cogl_framebuffer_get_driver (src_fb);
-  if (!COGL_IS_FRAMEBUFFER_DRIVER_VK (dst_drv) ||
-      !COGL_IS_FRAMEBUFFER_DRIVER_VK (src_drv))
-    return;
-
-  cogl_framebuffer_vk_adopt_targets_from (COGL_FRAMEBUFFER_DRIVER_VK (dst_drv),
-                                          COGL_FRAMEBUFFER_DRIVER_VK (src_drv));
+  cogl_framebuffer_vk_adopt_targets_from (COGL_FRAMEBUFFER_DRIVER_VK (driver),
+                                          COGL_FRAMEBUFFER_DRIVER_VK (source));
 }
 
 static void
@@ -2489,38 +2479,28 @@ out:
   return ok;
 }
 
-gboolean
-cogl_framebuffer_vk_blit_box (CoglFramebuffer *src_fb,
-                              CoglFramebuffer *dst_fb,
-                              int              src_x1,
-                              int              src_y1,
-                              int              src_x2,
-                              int              src_y2,
-                              int              dst_x1,
-                              int              dst_y1,
-                              int              dst_x2,
-                              int              dst_y2)
+static gboolean
+cogl_framebuffer_vk_blit (CoglFramebufferDriver *driver,
+                          CoglFramebufferDriver *destination,
+                          int                    src_x1,
+                          int                    src_y1,
+                          int                    src_x2,
+                          int                    src_y2,
+                          int                    dst_x1,
+                          int                    dst_y1,
+                          int                    dst_x2,
+                          int                    dst_y2,
+                          GError               **error)
 {
-  CoglFramebufferDriver *src_drv;
-  CoglFramebufferDriver *dst_drv;
-  CoglFramebufferVk *src_vk;
-  CoglFramebufferVk *dst_vk;
+  CoglFramebufferVk *src_vk = COGL_FRAMEBUFFER_DRIVER_VK (driver);
+  CoglFramebufferVk *dst_vk = COGL_FRAMEBUFFER_DRIVER_VK (destination);
   CoglDriverVk *driver_vk;
   CoglVkPass *pass;
-  g_autoptr (GError) error = NULL;
 
-  src_drv = cogl_framebuffer_get_driver (src_fb);
-  dst_drv = cogl_framebuffer_get_driver (dst_fb);
-  if (!COGL_IS_FRAMEBUFFER_DRIVER_VK (src_drv) ||
-      !COGL_IS_FRAMEBUFFER_DRIVER_VK (dst_drv))
-    return FALSE;
-
-  src_vk = COGL_FRAMEBUFFER_DRIVER_VK (src_drv);
-  dst_vk = COGL_FRAMEBUFFER_DRIVER_VK (dst_drv);
   if (!ensure_color_image (src_vk) || !ensure_color_image (dst_vk))
     return FALSE;
 
-  driver_vk = peek_driver_vk (dst_drv);
+  driver_vk = peek_driver_vk (destination);
   if (!driver_vk)
     return FALSE;
 
@@ -2528,17 +2508,10 @@ cogl_framebuffer_vk_blit_box (CoglFramebuffer *src_fb,
   if (!pass)
     return FALSE;
 
-  if (!cogl_vk_cmd_blit_images (pass, src_vk->color, dst_vk->color,
-                                src_x1, src_y1, src_x2, src_y2,
-                                dst_x1, dst_y1, dst_x2, dst_y2,
-                                0, 0, &error))
-    {
-      g_warning ("Cogl Vulkan: blit failed: %s",
-                 error ? error->message : "unknown");
-      return FALSE;
-    }
-
-  return TRUE;
+  return cogl_vk_cmd_blit_images (pass, src_vk->color, dst_vk->color,
+                                  src_x1, src_y1, src_x2, src_y2,
+                                  dst_x1, dst_y1, dst_x2, dst_y2,
+                                  0, 0, error);
 }
 
 static void
@@ -2718,6 +2691,8 @@ cogl_framebuffer_vk_class_init (CoglFramebufferVkClass *klass)
 
   object_klass->dispose = cogl_framebuffer_vk_dispose;
 
+  driver_klass->blit = cogl_framebuffer_vk_blit;
+  driver_klass->adopt_targets = cogl_framebuffer_vk_adopt_targets;
   driver_klass->query_bits = cogl_framebuffer_vk_query_bits;
   driver_klass->clear = cogl_framebuffer_vk_clear;
   driver_klass->finish = cogl_framebuffer_vk_finish;

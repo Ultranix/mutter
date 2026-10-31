@@ -90,9 +90,6 @@ COGL_EXPORT CoglVkPipelineCache * cogl_driver_vk_peek_pipeline_cache (CoglDriver
 VkSampler cogl_driver_vk_peek_sampler (CoglDriverVk                *driver,
                                        const CoglSamplerCacheEntry *entry);
 
-void cogl_driver_vk_set_drm_fd (CoglDriverVk *driver,
-                                int           drm_fd);
-
 void cogl_driver_vk_store_sync_fd_from_pass (CoglDriverVk *driver);
 
 int cogl_driver_vk_get_latest_sync_fd (CoglDriverVk *driver);
@@ -108,12 +105,6 @@ const CoglBoxedValue *
 cogl_driver_vk_peek_pending_uniform (CoglDriverVk *driver,
                                      GLint         location);
 
-/* Query the exact usage requested by the Vulkan dma-buf import path. */
-COGL_EXPORT gboolean
-cogl_context_vk_supports_dma_buf (CoglContext *context,
-                                  uint32_t     fourcc,
-                                  uint64_t     modifier,
-                                  uint32_t    *n_planes);
-
-COGL_EXPORT gboolean
-cogl_context_vk_consume_frame_error (CoglContext *context);
+gboolean cogl_driver_vk_initialize (CoglDriverVk  *driver_vk,
+                                    CoglRenderer  *renderer,
+                                    GError       **error);

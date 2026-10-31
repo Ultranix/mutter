@@ -241,3 +241,11 @@ cogl_render_device_create_dma_buf (CoglRenderDevice  *render_device,
 
   return NULL;
 }
+
+int
+cogl_render_device_get_drm_fd (CoglRenderDevice *render_device)
+{
+  CoglRenderDeviceClass *class = COGL_RENDER_DEVICE_GET_CLASS (render_device);
+
+  return class->get_drm_fd ? class->get_drm_fd (render_device) : -1;
+}

@@ -73,10 +73,20 @@ cogl_texture_driver_set_property (GObject *gobject,
     }
 }
 
+static CoglPixelFormat
+cogl_texture_driver_real_find_best_upload_format (CoglTextureDriver *driver,
+                                                  CoglPixelFormat    format)
+{
+  return format;
+}
+
 static void
 cogl_texture_driver_class_init (CoglTextureDriverClass *klass)
 {
   GObjectClass *gobject_class = G_OBJECT_CLASS (klass);
+
+  klass->find_best_upload_format =
+    cogl_texture_driver_real_find_best_upload_format;
 
   gobject_class->set_property = cogl_texture_driver_set_property;
 

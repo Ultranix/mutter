@@ -210,12 +210,10 @@ cogl_texture_2d_new_from_egl_image (CoglContext        *ctx,
                                     GError            **error);
 #endif
 
-#ifdef HAVE_VULKAN
 /**
  * cogl_texture_2d_new_from_dma_buf: (skip)
  *
- * Import a dma-buf as a #CoglTexture2D using the Vulkan driver
- * (%COGL_DRIVER=vulkan).
+ * Import a dma-buf as a #CoglTexture2D.
  */
 COGL_EXPORT CoglTexture *
 cogl_texture_2d_new_from_dma_buf (CoglContext     *ctx,
@@ -233,39 +231,42 @@ cogl_texture_2d_new_from_dma_buf (CoglContext     *ctx,
 /* Like new_from_dma_buf, with an explicit YUV interpretation in the cache key. */
 COGL_EXPORT CoglTexture *
 cogl_texture_2d_new_from_dma_buf_with_colorimetry (CoglContext     *ctx,
-                                  int              width,
-                                  int              height,
-                                  CoglPixelFormat  format,
-                                  uint32_t         drm_fourcc,
-                                  int              n_planes,
-                                  const int       *fds,
-                                  const uint32_t  *strides,
-                                  const uint32_t  *offsets,
-                                  const uint64_t  *modifiers,
-                                  CoglYuvMatrix    matrix,
-                                  CoglYuvRange     range,
-                                  GError         **error);
+                                                   int              width,
+                                                   int              height,
+                                                   CoglPixelFormat  format,
+                                                   uint32_t         drm_fourcc,
+                                                   int              n_planes,
+                                                   const int       *fds,
+                                                   const uint32_t  *strides,
+                                                   const uint32_t  *offsets,
+                                                   const uint64_t  *modifiers,
+                                                   CoglYuvMatrix    matrix,
+                                                   CoglYuvRange     range,
+                                                   GError         **error);
 
-/* Update an allocated Vulkan NV12 texture (including EGLImage imports).
+/* Update the colorimetry of an allocated YUV texture.
  * RGB textures and unsupported colorimetry return an error. Outstanding draws
  * are completed before replacing the immutable conversion view. */
 COGL_EXPORT gboolean
-cogl_texture_2d_set_yuv_colorimetry (CoglTexture *texture,
+cogl_texture_2d_set_yuv_colorimetry (CoglTexture  *texture,
                                      CoglYuvMatrix matrix,
-                                     CoglYuvRange range,
-                                     GError **error);
+                                     CoglYuvRange  range,
+                                     GError      **error);
 
 
 /**
  * cogl_texture_2d_set_acquire_sync_fd: (skip)
  *
- * Attach a Wayland drm_syncobj acquire SYNC_FD to a Vulkan texture.
- * Ownership of @sync_fd is transferred. No-op for non-Vulkan textures.
+ * Attach an acquire SYNC_FD to a texture.
+ * Ownership of @sync_fd is transferred.
  */
+COGL_EXPORT gboolean
+cogl_texture_2d_handles_acquire_sync_fd (CoglTexture *texture);
+
 COGL_EXPORT void
 cogl_texture_2d_set_acquire_sync_fd (CoglTexture *texture,
                                      int          sync_fd);
-#endif
+
 
 /**
  * cogl_texture_2d_set_auto_mipmap:

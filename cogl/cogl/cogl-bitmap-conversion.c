@@ -30,7 +30,7 @@
 
 #include "config.h"
 
-#include "cogl/driver/gl/cogl-driver-gl-private.h"
+#include "cogl/cogl-texture-driver.h"
 #include "cogl/cogl-private.h"
 #include "cogl/cogl-bitmap-private.h"
 #include "cogl/cogl-context-private.h"
@@ -46,21 +46,21 @@ typedef enum
   MEDIUM_TYPE_FLOAT,
 } MediumType;
 
-G_STATIC_ASSERT (sizeof (uint32_t) == sizeof (GLfloat));
+G_STATIC_ASSERT (sizeof (uint32_t) == sizeof (float));
 
 inline static uint32_t
-pack_flt (GLfloat b)
+pack_flt (float b)
 {
   uint32_t ret;
   memcpy (&ret, &b, sizeof (uint32_t));
   return ret;
 }
 
-inline static GLfloat
+inline static float
 unpack_flt (uint32_t b)
 {
-  GLfloat ret;
-  memcpy (&ret, &b, sizeof (GLfloat));
+  float ret;
+  memcpy (&ret, &b, sizeof (float));
   return ret;
 }
 
@@ -68,9 +68,9 @@ unpack_flt (uint32_t b)
 
 #define UNPACK_1(b) ((b) * ((1 << (sizeof (component_type) * 8)) - 1))
 #define UNPACK_2(b) (((b) * ((1 << (sizeof (component_type) * 8)) - 1) + \
-                                 1) / 3)
+                      1) / 3)
 #define UNPACK_4(b) (((b) * ((1 << (sizeof (component_type) * 8)) - 1) + \
-                                 7) / 0xf)
+                      7) / 0xf)
 #define UNPACK_5(b) (((b) * ((1 << (sizeof (component_type) * 8)) - 1) + \
                       0xf) / 0x1f)
 #define UNPACK_6(b) (((b) * ((1 << (sizeof (component_type) * 8)) - 1) + \
@@ -97,7 +97,7 @@ unpack_flt (uint32_t b)
 #define PACK_10(b) PACK_SIZE (b, 0x3ff)
 #define PACK_16(b) PACK_SIZE (b, 0xffff)
 #define PACK_SHORT(b) cogl_float_to_half ( \
-                        (b) / ((1 << (sizeof (component_type) * 8)) - 1))
+    (b) / ((1 << (sizeof (component_type) * 8)) - 1))
 #define PACK_FLOAT(b) pack_flt ((b) / ((1 << (sizeof (component_type) * 8)) - 1))
 
 #define component_type uint8_t
@@ -164,7 +164,7 @@ unpack_flt (uint32_t b)
 #define PACK_10(b) ((uint32_t) ((b) * 1023.5f))
 #define PACK_16(b) ((uint32_t) ((b) * 65535.0f))
 #define PACK_SHORT(b) cogl_float_to_half (b)
-#define PACK_FLOAT(b) pack_flt((b) / 1.0f)
+#define PACK_FLOAT(b) pack_flt ((b) / 1.0f)
 
 #define component_type float
 #define component_size float
@@ -783,19 +783,13 @@ _cogl_bitmap_convert_for_upload (CoglBitmap     *src_bmp,
   CoglContext *ctx = _cogl_bitmap_get_context (src_bmp);
   CoglPixelFormat src_format = cogl_bitmap_get_format (src_bmp);
   CoglDriver *driver = cogl_context_get_driver (ctx);
-  CoglRenderer *renderer = cogl_context_get_renderer (ctx);
   CoglBitmap *dst_bmp;
 
   g_return_val_if_fail (internal_format != COGL_PIXEL_FORMAT_ANY, NULL);
 
-  /* OpenGL supports specifying a different format for the internal
-     format when uploading texture data. We should use this to convert
-     formats because it is likely to be faster and support more types
-     than the Cogl bitmap code. However under GLES the internal format
-     must be the same as the bitmap format and it only supports a
-     limited number of formats so we must convert using the Cogl
-     bitmap code instead.
-     Vulkan has no GL pixel_format_to_gl — CPU-convert to internal. */
+  /* Use the driver's format conversion when available. Otherwise convert
+   * to a supported upload format before passing the bitmap to the driver.
+   */
 
   if (driver_can_convert (driver, src_format, internal_format))
     {
@@ -815,26 +809,15 @@ _cogl_bitmap_convert_for_upload (CoglBitmap     *src_bmp,
     }
   else
     {
+      g_autoptr (CoglTextureDriver) texture_driver = NULL;
+      CoglTextureDriverClass *texture_driver_class;
       CoglPixelFormat closest_format;
 
-      if (cogl_renderer_get_driver_id (renderer) == COGL_DRIVER_ID_VULKAN ||
-          !COGL_IS_DRIVER_GL (driver))
-        {
-          closest_format = internal_format;
-        }
-      else
-        {
-          CoglDriverGL *driver_gl = COGL_DRIVER_GL (driver);
-          CoglDriverGLClass *driver_klass =
-            COGL_DRIVER_GL_GET_CLASS (driver_gl);
-
-          closest_format =
-            driver_klass->pixel_format_to_gl (driver_gl,
-                                              internal_format,
-                                              NULL, /* ignore gl intformat */
-                                              NULL, /* ignore gl format */
-                                              NULL); /* ignore gl type */
-        }
+      texture_driver = cogl_driver_create_texture_driver (driver);
+      texture_driver_class = COGL_TEXTURE_DRIVER_GET_CLASS (texture_driver);
+      closest_format =
+        texture_driver_class->find_best_upload_format (texture_driver,
+                                                       internal_format);
 
       if (closest_format != src_format)
         dst_bmp = _cogl_bitmap_convert (src_bmp, closest_format, error);
