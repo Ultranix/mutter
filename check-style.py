@@ -90,7 +90,7 @@ def reformat_chunks(chunks, action):
 
     changed = None
 
-    for chunk in chunks:
+    for chunk in chunks[:]:
         # Add INDENT-ON/OFF comments
         tmp = create_temp_file(chunk['file'], chunk['start'], chunk['end'])
 
@@ -163,7 +163,7 @@ changed = reformat_chunks(chunks, Action.FILTER)
 if changed:
     last_file_changed = None
     file_reformatted = False
-    for chunk in chunks:
+    for chunk in chunks[:]:
         file = chunk['file']
         if file is not last_file_changed:
             last_file_changed = file
