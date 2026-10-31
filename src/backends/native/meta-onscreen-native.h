@@ -27,10 +27,11 @@
 #include "core/util-private.h"
 
 #define META_TYPE_ONSCREEN_NATIVE (meta_onscreen_native_get_type ())
-META_EXPORT_TEST
-G_DECLARE_FINAL_TYPE (MetaOnscreenNative, meta_onscreen_native,
-                      META, ONSCREEN_NATIVE,
-                      CoglOnscreenEgl)
+META_EXPORT_TEST G_DECLARE_FINAL_TYPE (MetaOnscreenNative,
+                                       meta_onscreen_native,
+                                       META,
+                                       ONSCREEN_NATIVE,
+                                       CoglOnscreen)
 
 void meta_onscreen_native_prepare_frame (CoglOnscreen *onscreen,
                                          ClutterFrame *frame);
@@ -68,5 +69,9 @@ void meta_onscreen_native_invalidate (MetaOnscreenNative *onscreen_native);
 
 void meta_onscreen_native_detach (MetaOnscreenNative *onscreen_native);
 
-void meta_onscreen_native_allow_vrr (MetaOnscreenNative *onscreen_native,
-                                     gboolean            allowed);
+void
+meta_onscreen_native_allow_vrr (MetaOnscreenNative *onscreen_native,
+                                gboolean            allowed);
+
+EGLSurface
+meta_onscreen_native_get_egl_surface (MetaOnscreenNative *onscreen_native);

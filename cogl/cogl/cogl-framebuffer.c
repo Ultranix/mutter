@@ -46,12 +46,8 @@
 #include "cogl/cogl-private.h"
 #include "cogl/cogl-primitives-private.h"
 #include "cogl/cogl-trace.h"
-#include "cogl/driver/gl/cogl-driver-gl-private.h"
+#include "cogl/cogl-driver-private.h"
 #include "cogl/winsys/cogl-winsys.h"
-#ifdef HAVE_VULKAN
-#include "cogl/driver/vk/cogl-driver-vk-private.h"
-#include "cogl/driver/vk/cogl-framebuffer-vk-private.h"
-#endif
 
 enum
 {
@@ -1499,6 +1495,10 @@ cogl_framebuffer_blit_setup (CoglFramebuffer  *framebuffer,
       return FALSE;
     }
 
+  if (!cogl_framebuffer_allocate (framebuffer, error) ||
+      !cogl_framebuffer_allocate (dst, error))
+    return FALSE;
+
   if (!cogl_can_blit_between_formats (priv->internal_format,
                                       dst_priv->internal_format))
     {
@@ -1536,7 +1536,7 @@ cogl_framebuffer_blit_setup (CoglFramebuffer  *framebuffer,
   return TRUE;
 }
 
-static void
+static gboolean
 cogl_framebuffer_blit_box (CoglFramebuffer *framebuffer,
                            CoglFramebuffer *dst,
                            int              src_x1,
@@ -1544,10 +1544,13 @@ cogl_framebuffer_blit_box (CoglFramebuffer *framebuffer,
                            int              src_x2,
                            int              src_y2,
                            int              dst_x_offset,
-                           int              dst_y_offset)
+                           int              dst_y_offset,
+                           GError         **error)
 {
-  CoglContext *ctx = cogl_framebuffer_get_context (framebuffer);
-  CoglDriver *driver = cogl_context_get_driver (ctx);
+  CoglFramebufferDriver *driver = cogl_framebuffer_get_driver (framebuffer);
+  CoglFramebufferDriver *destination = cogl_framebuffer_get_driver (dst);
+  CoglFramebufferDriverClass *driver_class =
+    COGL_FRAMEBUFFER_DRIVER_GET_CLASS (driver);
   int dst_x1, dst_y1, dst_x2, dst_y2;
 
   dst_x1 = src_x1 + dst_x_offset;
@@ -1573,20 +1576,17 @@ cogl_framebuffer_blit_box (CoglFramebuffer *framebuffer,
       src_y2 = src_y1 - (dst_y2 - dst_y1);
     }
 
-#ifdef HAVE_VULKAN
-  if (COGL_IS_DRIVER_VK (driver))
+  if (!driver_class->blit (driver, destination,
+                           src_x1, src_y1, src_x2, src_y2,
+                           dst_x1, dst_y1, dst_x2, dst_y2, error))
     {
-      cogl_framebuffer_vk_blit_box (framebuffer, dst,
-                                    src_x1, src_y1, src_x2, src_y2,
-                                    dst_x1, dst_y1, dst_x2, dst_y2);
-      return;
+      if (error && !*error)
+        g_set_error_literal (error, COGL_SYSTEM_ERROR, COGL_SYSTEM_ERROR_UNSUPPORTED,
+                             "Failed to blit framebuffer");
+      return FALSE;
     }
-#endif
 
-  GE (driver, glBlitFramebuffer (src_x1, src_y1, src_x2, src_y2,
-                                 dst_x1, dst_y1, dst_x2, dst_y2,
-                                 GL_COLOR_BUFFER_BIT,
-                                 GL_NEAREST));
+  return TRUE;
 }
 
 gboolean
@@ -1608,14 +1608,15 @@ cogl_framebuffer_blit_region (CoglFramebuffer  *framebuffer,
       int x1, y1, x2, y2;
 
       mtk_region_get_box (src_region, i, &x1, &y1, &x2, &y2);
-      cogl_framebuffer_blit_box (framebuffer,
-                                 dst,
-                                 x1,
-                                 y1,
-                                 x2,
-                                 y2,
-                                 dst_x_offset,
-                                 dst_y_offset);
+      if (!cogl_framebuffer_blit_box (framebuffer,
+                                      dst,
+                                      x1,
+                                      y1,
+                                      x2,
+                                      y2,
+                                      dst_x_offset,
+                                      dst_y_offset, error))
+        return FALSE;
     }
 
   return TRUE;
@@ -1632,20 +1633,17 @@ cogl_framebuffer_blit (CoglFramebuffer  *framebuffer,
                        int               height,
                        GError          **error)
 {
-  g_autoptr (MtkRegion) src_region = NULL;
-
   if (!cogl_framebuffer_blit_setup (framebuffer, dst, error))
     return FALSE;
 
-  cogl_framebuffer_blit_box (framebuffer,
-                             dst,
-                             src_x,
-                             src_y,
-                             src_x + width,
-                             src_y + height,
-                             dst_x - src_x,
-                             dst_y - src_y);
-  return TRUE;
+  return cogl_framebuffer_blit_box (framebuffer,
+                                    dst,
+                                    src_x,
+                                    src_y,
+                                    src_x + width,
+                                    src_y + height,
+                                    dst_x - src_x,
+                                    dst_y - src_y, error);
 }
 
 void
@@ -2535,4 +2533,20 @@ cogl_framebuffer_get_driver (CoglFramebuffer *framebuffer)
     cogl_framebuffer_get_instance_private (framebuffer);
 
   return priv->driver;
+}
+
+void
+cogl_framebuffer_adopt_targets (CoglFramebuffer *framebuffer,
+                                CoglFramebuffer *source)
+{
+  CoglFramebufferDriver *driver = cogl_framebuffer_get_driver (framebuffer);
+  CoglFramebufferDriver *source_driver = cogl_framebuffer_get_driver (source);
+  CoglFramebufferDriverClass *class;
+
+  if (!driver || !source_driver)
+    return;
+
+  class = COGL_FRAMEBUFFER_DRIVER_GET_CLASS (driver);
+  if (class->adopt_targets)
+    class->adopt_targets (driver, source_driver);
 }

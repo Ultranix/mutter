@@ -132,9 +132,7 @@ free_render_device_gpu_data (MetaRenderDevice *render_device)
       MetaBackend *backend = meta_render_device_get_backend (render_device);
       ClutterBackend *clutter_backend =
         meta_backend_get_clutter_backend (backend);
-      CoglRenderer *renderer =
-        cogl_render_device_get_renderer (COGL_RENDER_DEVICE (render_device));
-      CoglRendererEGL *renderer_egl = COGL_RENDERER_EGL (renderer);
+      CoglRendererEGL *renderer_egl = secondary_gpu_data->renderer_egl;
 
       if (clutter_backend)
         {
@@ -150,6 +148,8 @@ free_render_device_gpu_data (MetaRenderDevice *render_device)
                                          secondary_gpu_data->egl_context,
                                          NULL);
     }
+
+  g_clear_object (&secondary_gpu_data->renderer_egl);
 
   if (*crtc_needs_flush_handler_id)
     {
@@ -886,17 +886,18 @@ meta_renderer_native_create_view (MetaRenderer        *renderer,
                               NULL);
 
   if (META_IS_ONSCREEN_NATIVE (framebuffer))
+    meta_onscreen_native_set_view (COGL_ONSCREEN (framebuffer),
+                                   META_RENDERER_VIEW (view_native));
+
+  if (META_IS_ONSCREEN_NATIVE (framebuffer) &&
+      COGL_IS_DISPLAY_EGL (cogl_display))
     {
       CoglDisplayEGL *cogl_display_egl;
-      CoglOnscreenEgl *onscreen_egl;
-
-      meta_onscreen_native_set_view (COGL_ONSCREEN (framebuffer),
-                                     META_RENDERER_VIEW (view_native));
 
       /* Ensure we don't point to stale surfaces when creating the offscreen */
       cogl_display_egl = COGL_DISPLAY_EGL (cogl_display);
-      onscreen_egl = COGL_ONSCREEN_EGL (framebuffer);
-      egl_surface = cogl_onscreen_egl_get_egl_surface (onscreen_egl);
+      egl_surface = meta_onscreen_native_get_egl_surface (
+        META_ONSCREEN_NATIVE (framebuffer));
       cogl_display_egl_make_current (cogl_display_egl,
                                      egl_surface,
                                      egl_surface,
@@ -1196,13 +1197,22 @@ init_secondary_gpu_data_gpu (MetaRendererNative  *renderer_native,
     meta_render_device_get_secondary_gpu_data (render_device);
   CoglRenderer *renderer =
     cogl_render_device_get_renderer (COGL_RENDER_DEVICE (render_device));
-  CoglRendererEGL *renderer_egl = COGL_RENDERER_EGL (renderer);
+  g_autoptr (CoglRendererEGL) renderer_egl = NULL;
   gboolean ret = FALSE;
   EGLDisplay egl_display;
   EGLConfig egl_config;
   EGLContext egl_context;
   CoglContext *cogl_context;
   const char *egl_vendor;
+
+  if (COGL_IS_RENDERER_EGL (renderer))
+    renderer_egl = g_object_ref (COGL_RENDERER_EGL (renderer));
+  else
+    renderer_egl = meta_render_device_gbm_create_egl_renderer (
+      META_RENDER_DEVICE_GBM (render_device), error);
+
+  if (!renderer_egl)
+    return FALSE;
 
   egl_display = cogl_renderer_egl_get_edisplay (renderer_egl);
   if (egl_display == EGL_NO_DISPLAY)
@@ -1257,6 +1267,7 @@ init_secondary_gpu_data_gpu (MetaRendererNative  *renderer_native,
   if (!g_strcmp0 (egl_vendor, "NVIDIA"))
     secondary_gpu_data->is_nvidia = TRUE;
 
+  secondary_gpu_data->renderer_egl = g_steal_pointer (&renderer_egl);
   ret = TRUE;
 out:
   maybe_restore_cogl_egl_api (renderer_native);
@@ -1265,7 +1276,7 @@ out:
     {
       CoglDisplay *cogl_display = cogl_context_get_display (cogl_context);
 
-      cogl_display_egl_ensure_current (COGL_DISPLAY_EGL (cogl_display));
+      cogl_display_ensure_current (cogl_display);
     }
   return ret;
 }

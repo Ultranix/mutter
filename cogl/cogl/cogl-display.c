@@ -189,3 +189,22 @@ cogl_display_setup (CoglDisplay *display,
 
   return TRUE;
 }
+
+CoglContext *
+cogl_display_create_context (CoglDisplay  *display,
+                             GError      **error)
+{
+  if (!cogl_display_setup (display, error))
+    return NULL;
+
+  return COGL_DISPLAY_GET_CLASS (display)->create_context (display, error);
+}
+
+void
+cogl_display_ensure_current (CoglDisplay *display)
+{
+  CoglDisplayClass *class = COGL_DISPLAY_GET_CLASS (display);
+
+  if (class->ensure_current)
+    class->ensure_current (display);
+}

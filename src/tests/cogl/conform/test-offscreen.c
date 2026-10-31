@@ -346,11 +346,68 @@ test_write_only_readback_with_padded_rows (void)
     }
 }
 
+static void
+test_offscreen_blit (void)
+{
+  g_autoptr (CoglTexture) src_texture = NULL;
+  g_autoptr (CoglTexture) dst_texture = NULL;
+  g_autoptr (CoglOffscreen) src = NULL;
+  g_autoptr (CoglOffscreen) dst = NULL;
+  g_autoptr (MtkRegion) region = NULL;
+  g_autoptr (GError) error = NULL;
+  uint8_t pixels[8 * 8 * 4];
+  MtkRectangle rectangles[] = {
+    { 1, 1, 2, 2 },
+    { 4, 4, 2, 2 },
+  };
+  CoglFramebuffer *src_fb;
+  CoglFramebuffer *dst_fb;
+  int x, y;
+
+  for (y = 0; y < 8; y++)
+    for (x = 0; x < 8; x++)
+      {
+        int offset = (y * 8 + x) * 4;
+
+        pixels[offset] = y < 4 ? 255 : 0;
+        pixels[offset + 1] = y < 4 ? 0 : 255;
+        pixels[offset + 2] = 0;
+        pixels[offset + 3] = 255;
+      }
+
+  src_texture = cogl_texture_2d_new_from_data (test_ctx, 8, 8,
+                                               COGL_PIXEL_FORMAT_RGBA_8888_PRE,
+                                               8 * 4, pixels, &error);
+  g_assert_no_error (error);
+  dst_texture = cogl_texture_2d_new_with_size (test_ctx, 12, 12);
+  src = cogl_offscreen_new_with_texture (src_texture);
+  dst = cogl_offscreen_new_with_texture (dst_texture);
+  src_fb = COGL_FRAMEBUFFER (src);
+  dst_fb = COGL_FRAMEBUFFER (dst);
+  cogl_framebuffer_clear4f (dst_fb, COGL_BUFFER_BIT_COLOR, 0, 0, 1, 1);
+
+  g_assert_true (cogl_framebuffer_blit (src_fb, dst_fb,
+                                        1, 1, 2, 3, 2, 5, &error));
+  g_assert_no_error (error);
+  test_utils_check_region (dst_fb, 2, 3, 2, 3, 0xff0000ff);
+  test_utils_check_region (dst_fb, 2, 6, 2, 2, 0x00ff00ff);
+  test_utils_check_region (dst_fb, 4, 0, 8, 12, 0x0000ffff);
+
+  cogl_framebuffer_clear4f (dst_fb, COGL_BUFFER_BIT_COLOR, 0, 0, 1, 1);
+  region = mtk_region_create_rectangles (rectangles, G_N_ELEMENTS (rectangles));
+  g_assert_true (cogl_framebuffer_blit_region (src_fb, dst_fb, region,
+                                               2, 3, &error));
+  g_assert_no_error (error);
+  test_utils_check_region (dst_fb, 3, 4, 2, 2, 0xff0000ff);
+  test_utils_check_region (dst_fb, 6, 7, 2, 2, 0x00ff00ff);
+  test_utils_check_region (dst_fb, 5, 0, 1, 12, 0x0000ffff);
+}
+
 COGL_TEST_SUITE (
   g_test_add_func ("/bitmap/access", test_bitmap_access);
   g_test_add_func ("/offscreen", test_offscreen);
+  g_test_add_func ("/offscreen/blit", test_offscreen_blit);
   g_test_add_func ("/offscreen/dma-buf-without-egl-image-support",
                    test_dma_buf_framebuffer_without_egl_image_support);
   g_test_add_func ("/offscreen/write-only-readback-padded-rows",
-                   test_write_only_readback_with_padded_rows);
-)
+                   test_write_only_readback_with_padded_rows); )

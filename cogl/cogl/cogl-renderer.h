@@ -39,6 +39,7 @@
 #include "cogl/winsys/cogl-winsys.h"
 
 #include <glib-object.h>
+#include <sys/types.h>
 
 G_BEGIN_DECLS
 
@@ -98,6 +99,7 @@ typedef enum
  * @COGL_RENDERER_FEATURE_PARTIAL_UPDATE: Partial surface update support
  * @COGL_RENDERER_FEATURE_CONTEXT_PRIORITY: Context priority support
  * @COGL_RENDERER_FEATURE_NO_CONFIG_CONTEXT: No-config context support
+ * @COGL_RENDERER_FEATURE_OFFSCREEN_ONLY: Rendering requires imported framebuffers
  */
 typedef enum _CoglRendererFeature
 {
@@ -106,6 +108,7 @@ typedef enum _CoglRendererFeature
   COGL_RENDERER_FEATURE_PARTIAL_UPDATE,
   COGL_RENDERER_FEATURE_CONTEXT_PRIORITY,
   COGL_RENDERER_FEATURE_NO_CONFIG_CONTEXT,
+  COGL_RENDERER_FEATURE_OFFSCREEN_ONLY,
 
   COGL_RENDERER_N_FEATURES
 } CoglRendererFeature;
@@ -115,6 +118,8 @@ typedef enum _CoglRendererFeature
 struct _CoglRendererClass
 {
   GObjectClass parent_class;
+
+  CoglDisplay * (* create_display) (CoglRenderer *renderer);
 
   void (* bind_api) (CoglRenderer *renderer);
 
@@ -151,6 +156,15 @@ struct _CoglRendererClass
                                         GArray        *external_only,
                                         GError       **error);
 
+  gboolean (* can_import_dma_buf) (CoglRenderer *renderer,
+                                   uint32_t      drm_format,
+                                   uint64_t      modifier,
+                                   int           n_planes);
+
+  gboolean (* query_drm_device) (CoglRenderer  *renderer,
+                                 dev_t         *device_id,
+                                 GError       **error);
+
   gboolean (* is_hardware_accelerated) (CoglRenderer *renderer);
 
   void (* update_sync) (CoglRenderer *renderer);
@@ -164,6 +178,53 @@ G_DECLARE_DERIVABLE_TYPE (CoglRenderer,
                           COGL,
                           RENDERER,
                           GObject)
+
+/**
+ * cogl_renderer_new:
+ * @render_device: (nullable): Render device, or %NULL for automatic selection
+ *
+ * Returns: (transfer full): A renderer for the configured graphics API
+ */
+COGL_EXPORT
+CoglRenderer *
+cogl_renderer_new (CoglRenderDevice * render_device);
+
+/**
+ * cogl_renderer_create_display:
+ * @renderer: A connected renderer
+ *
+ * Returns: (transfer full): A display for @renderer
+ */
+COGL_EXPORT CoglDisplay *
+cogl_renderer_create_display (CoglRenderer *renderer);
+
+/**
+ * cogl_renderer_query_drm_device: (skip)
+ * @renderer: A connected renderer
+ * @device_id: (out): DRM device identifier
+ * @error: Return location for an error
+ *
+ * Returns: %TRUE if a DRM device was found
+ */
+COGL_EXPORT gboolean
+cogl_renderer_query_drm_device (CoglRenderer  *renderer,
+                                dev_t         *device_id,
+                                GError       **error);
+
+/**
+ * cogl_renderer_can_import_dma_buf:
+ * @renderer: A connected renderer
+ * @drm_format: DRM format code
+ * @modifier: DRM format modifier
+ * @n_planes: Plane count, or 0 to query without a plane-count constraint
+ *
+ * Returns: Whether the renderer supports importing this buffer layout
+ */
+COGL_EXPORT gboolean
+cogl_renderer_can_import_dma_buf (CoglRenderer *renderer,
+                                  uint32_t      drm_format,
+                                  uint64_t      modifier,
+                                  int           n_planes);
 
 /* Final connection API */
 
@@ -297,19 +358,5 @@ int cogl_renderer_get_latest_sync_fd (CoglRenderer *renderer);
  */
 COGL_EXPORT CoglRenderDevice *
 cogl_renderer_get_render_device (CoglRenderer *renderer);
-#ifdef HAVE_VULKAN
-/**
- * cogl_renderer_set_vulkan_drm_fd: (skip)
- * @renderer: a #CoglRenderer
- * @drm_fd: DRM device fd used by KMS/GBM, or -1
- *
- * Selects the Vulkan physical device matching @drm_fd (same GPU as
- * the native backend). Must be called before the Cogl context is
- * created when using %COGL_DRIVER=vulkan.
- */
-COGL_EXPORT void
-cogl_renderer_set_vulkan_drm_fd (CoglRenderer *renderer,
-                                 int           drm_fd);
-#endif
 
 G_END_DECLS

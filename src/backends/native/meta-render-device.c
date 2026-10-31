@@ -80,7 +80,7 @@ meta_render_device_initable_init (GInitable     *initable,
     }
 
   cogl_render_device_set_renderer (COGL_RENDER_DEVICE (render_device),
-                                    renderer);
+                                   renderer);
 
   return TRUE;
 }
@@ -350,6 +350,15 @@ meta_render_device_create_dma_buf_impl (CoglRenderDevice  *cogl_render_device,
   return NULL;
 }
 
+static int
+meta_render_device_get_drm_fd (CoglRenderDevice *render_device)
+{
+  MetaDeviceFile *device_file =
+    meta_render_device_get_device_file (META_RENDER_DEVICE (render_device));
+
+  return device_file ? meta_device_file_get_fd (device_file) : -1;
+}
+
 static void
 meta_render_device_class_init (MetaRenderDeviceClass *klass)
 {
@@ -357,6 +366,7 @@ meta_render_device_class_init (MetaRenderDeviceClass *klass)
   CoglRenderDeviceClass *render_device_class =
     COGL_RENDER_DEVICE_CLASS (klass);
 
+  render_device_class->get_drm_fd = meta_render_device_get_drm_fd;
   render_device_class->query_drm_modifiers =
     meta_render_device_query_drm_modifiers_impl;
   render_device_class->get_implicit_drm_modifier =

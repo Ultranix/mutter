@@ -1221,3 +1221,12 @@ cogl_context_set_buffer_map_fallback_offset (CoglContext *context,
 
   priv->buffer_map_fallback_offset = offset;
 }
+
+gboolean
+cogl_context_consume_frame_error (CoglContext *context)
+{
+  CoglDriver *driver = cogl_context_get_driver (context);
+  CoglDriverClass *class = COGL_DRIVER_GET_CLASS (driver);
+
+  return class->consume_frame_error ? class->consume_frame_error (driver) : FALSE;
+}

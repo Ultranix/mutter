@@ -81,6 +81,11 @@ struct _CoglDisplayClass
   gboolean (*setup) (CoglDisplay  *display,
                      GError      **error);
 
+  CoglContext * (* create_context) (CoglDisplay  *display,
+                                    GError      **error);
+
+  void (* ensure_current) (CoglDisplay *display);
+
   void (*destroy) (CoglDisplay  *display);
 };
 
@@ -123,5 +128,19 @@ cogl_display_get_renderer (CoglDisplay *display);
 COGL_EXPORT gboolean
 cogl_display_setup (CoglDisplay *display,
                     GError     **error);
+
+/**
+ * cogl_display_create_context:
+ * @display: A display
+ * @error: Return location for an error
+ *
+ * Returns: (transfer full) (nullable): A rendering context, or %NULL on error
+ */
+COGL_EXPORT CoglContext *
+cogl_display_create_context (CoglDisplay  *display,
+                             GError      **error);
+
+COGL_EXPORT void
+cogl_display_ensure_current (CoglDisplay *display);
 
 G_END_DECLS

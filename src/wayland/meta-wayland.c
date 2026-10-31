@@ -899,11 +899,10 @@ meta_wayland_init_egl (MetaWaylandCompositor *compositor)
   ClutterBackend *clutter_backend = meta_backend_get_clutter_backend (backend);
   CoglContext *cogl_context =
     clutter_backend_get_cogl_context (clutter_backend);
-  CoglRendererEGL *renderer_egl =
-    COGL_RENDERER_EGL (cogl_context_get_renderer (cogl_context));
+  CoglRenderer *renderer = cogl_context_get_renderer (cogl_context);
   g_autoptr (GError) error = NULL;
 
-  if (!cogl_renderer_has_feature (COGL_RENDERER (renderer_egl),
+  if (!cogl_renderer_has_feature (renderer,
                                   COGL_RENDERER_FEATURE_WAYLAND_BUFFER))
     {
       meta_topic (META_DEBUG_WAYLAND,
@@ -914,7 +913,7 @@ meta_wayland_init_egl (MetaWaylandCompositor *compositor)
   meta_topic (META_DEBUG_WAYLAND,
               "Binding Wayland EGL display");
 
-  if (cogl_renderer_egl_bind_wayland_display (renderer_egl,
+  if (cogl_renderer_egl_bind_wayland_display (COGL_RENDERER_EGL (renderer),
                                               compositor->wayland_display,
                                               &error))
     priv->is_wayland_egl_display_bound = TRUE;

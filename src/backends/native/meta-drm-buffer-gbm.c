@@ -22,6 +22,9 @@
 #include "config.h"
 
 #include "backends/native/meta-drm-buffer-gbm.h"
+
+#include <glib/gstdio.h>
+
 #include "backends/native/meta-egl-gbm.h"
 
 #include <drm_fourcc.h>
@@ -267,6 +270,54 @@ meta_drm_buffer_gbm_new_take (MetaDeviceFile      *device_file,
   return buffer_gbm;
 }
 
+CoglTexture *
+meta_drm_buffer_gbm_import_texture (MetaDrmBufferGbm  *buffer_gbm,
+                                    CoglContext       *context,
+                                    GError           **error)
+{
+  struct gbm_bo *bo = buffer_gbm->bo;
+  const MetaFormatInfo *format_info;
+  uint32_t strides[4];
+  uint32_t offsets[4];
+  uint64_t modifiers[4];
+  int fds[4] = { -1, -1, -1, -1 };
+  int n_planes = gbm_bo_get_plane_count (bo);
+  int i;
+  CoglTexture *texture = NULL;
+
+  format_info = meta_format_info_from_drm_format (gbm_bo_get_format (bo));
+  if (!format_info || n_planes < 1 || n_planes > G_N_ELEMENTS (fds))
+    {
+      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                           "Unsupported GBM buffer format or plane count");
+      return NULL;
+    }
+
+  for (i = 0; i < n_planes; i++)
+    {
+      fds[i] = gbm_bo_get_fd_for_plane (bo, i);
+      if (fds[i] < 0)
+        {
+          g_set_error (error, G_IO_ERROR, g_io_error_from_errno (errno),
+                       "Failed to export GBM plane: %s", g_strerror (errno));
+          goto out;
+        }
+      strides[i] = gbm_bo_get_stride_for_plane (bo, i);
+      offsets[i] = gbm_bo_get_offset (bo, i);
+      modifiers[i] = gbm_bo_get_modifier (bo);
+    }
+
+  texture = cogl_texture_2d_new_from_dma_buf (
+    context, gbm_bo_get_width (bo), gbm_bo_get_height (bo),
+    format_info->cogl_format, format_info->drm_format,
+    n_planes, fds, strides, offsets, modifiers, error);
+
+out:
+  for (i = 0; i < n_planes; i++)
+    g_clear_fd (&fds[i], NULL);
+  return texture;
+}
+
 static gboolean
 meta_drm_buffer_gbm_copy_to_framebuffer (CoglScanout      *scanout,
                                          CoglFramebuffer  *framebuffer,
@@ -282,13 +333,8 @@ meta_drm_buffer_gbm_copy_to_framebuffer (CoglScanout      *scanout,
     meta_backend_get_clutter_backend (backend);
   CoglContext *cogl_context =
     clutter_backend_get_cogl_context (clutter_backend);
-  CoglDisplay *cogl_display = cogl_context_get_display (cogl_context);
-  CoglRenderer *cogl_renderer = cogl_display_get_renderer (cogl_display);
-  CoglRendererEGL *renderer_egl = COGL_RENDERER_EGL (cogl_renderer);
-  EGLImageKHR egl_image;
   CoglPixelFormat cogl_format;
   CoglPixelFormat dst_format;
-  CoglEglImageFlags flags;
   g_autoptr (CoglOffscreen) cogl_fbo = NULL;
   g_autoptr (CoglTexture) cogl_tex = NULL;
   uint32_t width;
@@ -296,14 +342,6 @@ meta_drm_buffer_gbm_copy_to_framebuffer (CoglScanout      *scanout,
   uint32_t format;
   const MetaFormatInfo *format_info;
   g_autoptr (CoglPipeline) pipeline = NULL;
-
-  egl_image = meta_egl_ensure_gbm_bo_egl_image (renderer_egl,
-                                                buffer_gbm->bo,
-                                                META_EGL_GPU_PRIMARY,
-                                                error);
-
-  if (egl_image == EGL_NO_IMAGE_KHR)
-    return FALSE;
 
   width = gbm_bo_get_width (buffer_gbm->bo);
   height = gbm_bo_get_height (buffer_gbm->bo);
@@ -313,14 +351,7 @@ meta_drm_buffer_gbm_copy_to_framebuffer (CoglScanout      *scanout,
   g_assert (format_info);
   cogl_format = format_info->cogl_format;
 
-  flags = COGL_EGL_IMAGE_FLAG_NO_GET_DATA;
-  cogl_tex = cogl_texture_2d_new_from_egl_image (cogl_context,
-                                                 width,
-                                                 height,
-                                                 cogl_format,
-                                                 egl_image,
-                                                 flags,
-                                                 error);
+  cogl_tex = meta_drm_buffer_gbm_import_texture (buffer_gbm, cogl_context, error);
 
   if (!cogl_tex)
     return FALSE;

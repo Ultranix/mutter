@@ -31,6 +31,7 @@
 #include <drm_fourcc.h>
 
 #include "cogl/cogl-display-egl.h"
+#include "cogl/cogl-context-egl.h"
 #include "cogl/cogl-display-egl-private.h"
 #include "cogl/cogl-render-device.h"
 #include "cogl/cogl-renderer-egl.h"
@@ -385,15 +386,6 @@ static gboolean
 cogl_display_egl_setup (CoglDisplay  *display,
                         GError      **error)
 {
-#ifdef HAVE_VULKAN
-  CoglRenderer *renderer = cogl_display_get_renderer (display);
-
-  /* Vulkan owns the GPU device; skip GL EGLContext. GBM/EGL display may
-   * still exist for buffer allocation in the native backend. */
-  if (cogl_renderer_get_driver_id (renderer) == COGL_DRIVER_ID_VULKAN)
-    return TRUE;
-#endif
-
   if (!try_create_context (display, error))
     goto error;
 
@@ -405,10 +397,18 @@ error:
 }
 
 static void
+cogl_display_egl_ensure_current_impl (CoglDisplay *display)
+{
+  cogl_display_egl_ensure_current (COGL_DISPLAY_EGL (display));
+}
+
+static void
 cogl_display_egl_class_init (CoglDisplayEGLClass *class)
 {
   CoglDisplayClass *display_class = COGL_DISPLAY_CLASS (class);
 
+  display_class->ensure_current = cogl_display_egl_ensure_current_impl;
+  display_class->create_context = cogl_context_egl_new;
   display_class->setup = cogl_display_egl_setup;
   display_class->destroy = cogl_display_egl_destroy;
 

@@ -25,6 +25,8 @@
 #include "config.h"
 
 #include "cogl/driver/vk/cogl-driver-vk-private.h"
+
+#include "cogl/cogl-render-device.h"
 #include "cogl/driver/vk/cogl-buffer-impl-vk-private.h"
 #include "cogl/driver/vk/cogl-framebuffer-vk-private.h"
 #include "cogl/driver/vk/cogl-texture-driver-vk-private.h"
@@ -86,14 +88,6 @@ cogl_driver_vk_peek_pipeline_cache (CoglDriverVk *driver)
 {
   g_return_val_if_fail (COGL_IS_DRIVER_VK (driver), NULL);
   return driver->pipeline_cache;
-}
-
-void
-cogl_driver_vk_set_drm_fd (CoglDriverVk *driver,
-                           int           drm_fd)
-{
-  g_return_if_fail (COGL_IS_DRIVER_VK (driver));
-  driver->pending_drm_fd = drm_fd;
 }
 
 void
@@ -306,15 +300,15 @@ cogl_driver_vk_peek_pending_uniform (CoglDriverVk *driver,
                               GINT_TO_POINTER (location));
 }
 
-static gboolean
-cogl_driver_vk_context_init (CoglDriver  *driver,
-                             CoglContext *context)
+gboolean
+cogl_driver_vk_initialize (CoglDriverVk  *driver_vk,
+                           CoglRenderer  *renderer,
+                           GError       **error)
 {
-  CoglDriverVk *driver_vk = COGL_DRIVER_VK (driver);
+  CoglDriver *driver = COGL_DRIVER (driver_vk);
   g_autoptr (GError) local_error = NULL;
-  int drm_fd = driver_vk->pending_drm_fd;
-
-  (void) context;
+  CoglRenderDevice *render_device = cogl_renderer_get_render_device (renderer);
+  int drm_fd = render_device ? cogl_render_device_get_drm_fd (render_device) : -1;
 
   if (driver_vk->vk_device)
     return TRUE;
@@ -326,11 +320,12 @@ cogl_driver_vk_context_init (CoglDriver  *driver,
         drm_fd = atoi (env);
     }
 
+  driver_vk->pending_drm_fd = drm_fd;
   driver_vk->vk_device = cogl_vk_device_new (drm_fd, &local_error);
   if (!driver_vk->vk_device)
     {
-      g_warning ("Cogl Vulkan: device init failed: %s",
-                 local_error ? local_error->message : "unknown");
+      g_propagate_prefixed_error (error, g_steal_pointer (&local_error),
+                                  "Failed to initialize Vulkan device: ");
       return FALSE;
     }
 
@@ -345,8 +340,8 @@ cogl_driver_vk_context_init (CoglDriver  *driver,
     cogl_vk_pipeline_cache_new (driver_vk->vk_device, &local_error);
   if (!driver_vk->pipeline_cache)
     {
-      g_warning ("Cogl Vulkan: pipeline cache failed: %s",
-                 local_error ? local_error->message : "unknown");
+      g_propagate_prefixed_error (error, g_steal_pointer (&local_error),
+                                  "Failed to initialize Vulkan pipeline cache: ");
       g_clear_pointer (&driver_vk->vk_device, cogl_vk_device_free);
       return FALSE;
     }
@@ -1346,6 +1341,8 @@ cogl_driver_vk_dispose (GObject *object)
   G_OBJECT_CLASS (cogl_driver_vk_parent_class)->dispose (object);
 }
 
+static gboolean cogl_driver_vk_consume_frame_error (CoglDriver *driver);
+
 static void
 cogl_driver_vk_class_init (CoglDriverVkClass *klass)
 {
@@ -1354,7 +1351,7 @@ cogl_driver_vk_class_init (CoglDriverVkClass *klass)
 
   object_klass->dispose = cogl_driver_vk_dispose;
 
-  driver_klass->context_init = cogl_driver_vk_context_init;
+  driver_klass->consume_frame_error = cogl_driver_vk_consume_frame_error;
   driver_klass->get_vendor = cogl_driver_vk_get_vendor;
   driver_klass->get_graphics_reset_status =
     cogl_driver_vk_get_graphics_reset_status;
@@ -1386,26 +1383,11 @@ cogl_driver_vk_init (CoglDriverVk *driver)
   driver->pending_stencil_clip = FALSE;
 }
 
-gboolean
-cogl_context_vk_supports_dma_buf (CoglContext *context,
-                                  uint32_t     fourcc,
-                                  uint64_t     modifier,
-                                  uint32_t    *n_planes)
+static gboolean
+cogl_driver_vk_consume_frame_error (CoglDriver *driver)
 {
-  CoglDriver *driver = cogl_context_get_driver (context);
-
-  g_return_val_if_fail (COGL_IS_DRIVER_VK (driver), FALSE);
-  return cogl_vk_dmabuf_format_supported (COGL_DRIVER_VK (driver)->vk_device,
-                                          fourcc, modifier,
-                                          cogl_vk_dmabuf_image_usage (fourcc),
-                                          n_planes);
-}
-
-gboolean
-cogl_context_vk_consume_frame_error (CoglContext *context)
-{
-  CoglDriverVk *driver = COGL_DRIVER_VK (cogl_context_get_driver (context));
-  gboolean failed = driver->submission_failed;
-  driver->submission_failed = FALSE;
-  return failed || (driver->vk_device && driver->vk_device->device_lost);
+  CoglDriverVk *driver_vk = COGL_DRIVER_VK (driver);
+  gboolean failed = driver_vk->submission_failed;
+  driver_vk->submission_failed = FALSE;
+  return failed || (driver_vk->vk_device && driver_vk->vk_device->device_lost);
 }

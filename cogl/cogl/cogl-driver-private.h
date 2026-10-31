@@ -48,6 +48,8 @@ struct _CoglDriverClass
   gboolean (* context_init) (CoglDriver  *driver,
                              CoglContext *context);
 
+  gboolean (* consume_frame_error) (CoglDriver *driver);
+
   const char * (* get_vendor) (CoglDriver *driver);
 
   CoglGraphicsResetStatus (* get_graphics_reset_status) (CoglDriver *driver);

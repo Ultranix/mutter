@@ -52,6 +52,7 @@ typedef struct
   gboolean is_nvidia;
 
   /* For GPU blit mode */
+  CoglRendererEGL *renderer_egl;
   EGLContext egl_context;
 } MetaRendererNativeSecondaryGpuData;
 

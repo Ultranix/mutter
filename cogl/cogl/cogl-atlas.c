@@ -42,12 +42,6 @@
 #include "cogl/cogl-framebuffer-private.h"
 #include "cogl/cogl-blit.h"
 #include "cogl/cogl-private.h"
-#include "cogl/cogl-renderer.h"
-#ifdef HAVE_VULKAN
-#include "cogl/driver/vk/cogl-driver-vk-private.h"
-#endif
-#include "cogl/driver/gl/cogl-driver-gl-private.h"
-#include "cogl/driver/gl/cogl-texture-driver-gl-private.h"
 
 #include <stdlib.h>
 
@@ -201,38 +195,16 @@ _cogl_atlas_texture_size_supported (CoglContext     *ctx,
                                     unsigned int     height)
 {
   CoglDriver *driver = cogl_context_get_driver (ctx);
-  CoglDriverGL *driver_gl;
-  CoglDriverGLClass *driver_klass;
-  GLenum gl_intformat;
-  GLenum gl_format;
-  GLenum gl_type;
+  g_autoptr (CoglTextureDriver) texture_driver = NULL;
+  CoglTextureDriverClass *texture_driver_class;
 
-#ifdef HAVE_VULKAN
-  if (cogl_renderer_get_driver_id (cogl_context_get_renderer (ctx)) ==
-      COGL_DRIVER_ID_VULKAN)
-    {
-      CoglVkDevice *device =
-        cogl_driver_vk_peek_device (COGL_DRIVER_VK (driver));
+  if (width == 0 || height == 0 || width > G_MAXINT || height > G_MAXINT)
+    return FALSE;
 
-      return width > 0 && height > 0 &&
-             width <= device->limits.maxImageDimension2D &&
-             height <= device->limits.maxImageDimension2D;
-    }
-#endif
-
-  driver_gl = COGL_DRIVER_GL (driver);
-  driver_klass = COGL_DRIVER_GL_GET_CLASS (driver_gl);
-  driver_klass->pixel_format_to_gl (driver_gl,
-                                    format,
-                                    &gl_intformat,
-                                    &gl_format,
-                                    &gl_type);
-  return driver_klass->texture_size_supported (driver_gl,
-                                               GL_TEXTURE_2D,
-                                               gl_intformat,
-                                               gl_format,
-                                               gl_type,
-                                               width, height);
+  texture_driver = cogl_driver_create_texture_driver (driver);
+  texture_driver_class = COGL_TEXTURE_DRIVER_GET_CLASS (texture_driver);
+  return texture_driver_class->texture_2d_can_create (texture_driver, ctx,
+                                                      width, height, format);
 }
 
 static void

@@ -758,6 +758,28 @@ EXIT:
   return status;
 }
 
+static gboolean
+cogl_gl_framebuffer_blit (CoglFramebufferDriver *driver,
+                          CoglFramebufferDriver *destination,
+                          int                    src_x1,
+                          int                    src_y1,
+                          int                    src_x2,
+                          int                    src_y2,
+                          int                    dst_x1,
+                          int                    dst_y1,
+                          int                    dst_x2,
+                          int                    dst_y2,
+                          GError               **error)
+{
+  CoglContext *context = context_from_driver (driver);
+  CoglDriver *cogl_driver = cogl_context_get_driver (context);
+
+  GE (cogl_driver, glBlitFramebuffer (src_x1, src_y1, src_x2, src_y2,
+                                      dst_x1, dst_y1, dst_x2, dst_y2,
+                                      GL_COLOR_BUFFER_BIT, GL_NEAREST));
+  return TRUE;
+}
+
 static void
 cogl_gl_framebuffer_init (CoglGlFramebuffer *gl_framebuffer)
 {
@@ -769,6 +791,7 @@ cogl_gl_framebuffer_class_init (CoglGlFramebufferClass *klass)
   CoglFramebufferDriverClass *driver_class =
     COGL_FRAMEBUFFER_DRIVER_CLASS (klass);
 
+  driver_class->blit = cogl_gl_framebuffer_blit;
   driver_class->clear = cogl_gl_framebuffer_clear;
   driver_class->finish = cogl_gl_framebuffer_finish;
   driver_class->flush = cogl_gl_framebuffer_flush;

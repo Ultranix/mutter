@@ -34,6 +34,7 @@
 
 #include "cogl/cogl-pixel-format.h"
 #include "cogl/cogl-types.h"
+#include "cogl/cogl-texture-2d.h"
 
 typedef struct _CoglDriver CoglDriver;
 
@@ -49,6 +50,21 @@ struct _CoglTextureDriverClass
 {
   GObjectClass parent_class;
 
+  CoglTexture * (* texture_2d_new_from_dma_buf) (CoglTextureDriver *driver,
+                                                 CoglContext       *context,
+                                                 int                width,
+                                                 int                height,
+                                                 CoglPixelFormat    format,
+                                                 uint32_t           drm_format,
+                                                 int                n_planes,
+                                                 const int         *fds,
+                                                 const uint32_t    *strides,
+                                                 const uint32_t    *offsets,
+                                                 const uint64_t    *modifiers,
+                                                 CoglYuvMatrix      matrix,
+                                                 CoglYuvRange       range,
+                                                 GError           **error);
+
   /* Returns the GType of the driver-specific CoglTexture2D subclass */
   GType (* texture_2d_get_type) (CoglTextureDriver *driver);
 
@@ -60,6 +76,9 @@ struct _CoglTextureDriverClass
                                       int                width,
                                       int                height,
                                       CoglPixelFormat    internal_format);
+
+  CoglPixelFormat (* find_best_upload_format) (CoglTextureDriver *driver,
+                                               CoglPixelFormat    format);
 
   /* The driver may impose constraints on what formats can be used to store
    * texture data read from textures.

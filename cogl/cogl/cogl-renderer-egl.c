@@ -28,7 +28,12 @@
 
 #include "config.h"
 
+#include <drm_fourcc.h>
+#include <sys/stat.h>
+#include <errno.h>
+
 #include "cogl/cogl-renderer-egl.h"
+#include "cogl/cogl-display-egl.h"
 #include "cogl/cogl-debug.h"
 #include "cogl/cogl-driver-gl.h"
 #include "cogl/cogl-driver-private.h"
@@ -42,10 +47,6 @@
 #endif
 #ifdef HAVE_GLES2
 #include "cogl/driver/gl/gles2/cogl-driver-gles2-private.h"
-#endif
-#ifdef HAVE_VULKAN
-#include "cogl/driver/vk/cogl-driver-vk-private.h"
-#include "cogl/driver/vk/cogl-texture-driver-vk-private.h"
 #endif
 
 #include "cogl/cogl-renderer-egl-private.h"
@@ -210,14 +211,9 @@ cogl_renderer_egl_dispose (GObject *object)
 static void
 cogl_renderer_egl_bind_api (CoglRenderer *renderer)
 {
-  CoglDriverId driver_id = cogl_renderer_get_driver_id (renderer);
-
-  if (driver_id == COGL_DRIVER_ID_VULKAN)
-    return;
-
-  if (driver_id == COGL_DRIVER_ID_GL3)
+  if (cogl_renderer_get_driver_id (renderer) == COGL_DRIVER_ID_GL3)
     eglBindAPI (EGL_OPENGL_API);
-  else if (driver_id == COGL_DRIVER_ID_GLES2)
+  else if (cogl_renderer_get_driver_id (renderer) == COGL_DRIVER_ID_GLES2)
     eglBindAPI (EGL_OPENGL_ES_API);
 }
 
@@ -248,16 +244,6 @@ cogl_renderer_egl_load_driver (CoglRenderer  *renderer,
     {
       driver = g_object_new (COGL_TYPE_DRIVER_GLES2, NULL);
       libgl_name = COGL_GLES2_LIBNAME;
-    }
-#endif
-#ifdef HAVE_VULKAN
-  if (driver_id == COGL_DRIVER_ID_VULKAN)
-    {
-      /* No libGL / EGL GL context — Vulkan owns the GPU device. GBM/KMS
-       * remain in the native backend for scanout (Weston-style split). */
-      driver = g_object_new (COGL_TYPE_DRIVER_VK, NULL);
-      cogl_renderer_set_driver (renderer, driver);
-      return TRUE;
     }
 #endif
 
@@ -342,9 +328,9 @@ cogl_renderer_egl_get_proc_address (CoglRenderer *renderer,
   priv->proc = (void *) cogl_renderer_get_proc_address (renderer, #proc)
 
 void
-cogl_renderer_egl_init_extensions (CoglRenderer *renderer)
+cogl_renderer_egl_init_extensions (CoglRendererEGL *renderer_egl)
 {
-  CoglRendererEGL *renderer_egl = COGL_RENDERER_EGL (renderer);
+  CoglRenderer *renderer = COGL_RENDERER (renderer_egl);
   CoglRendererEGLPrivate *priv =
     cogl_renderer_egl_get_instance_private (renderer_egl);
   const char *egl_extensions;
@@ -377,8 +363,8 @@ cogl_renderer_egl_init_extensions (CoglRenderer *renderer)
         {
           priv->private_features |= COGL_EGL_WINSYS_FEATURE_BUFFER_AGE;
           cogl_renderer_set_feature (renderer,
-                                    COGL_RENDERER_FEATURE_PARTIAL_UPDATE,
-                                    TRUE);
+                                     COGL_RENDERER_FEATURE_PARTIAL_UPDATE,
+                                     TRUE);
         }
     }
 
@@ -387,8 +373,8 @@ cogl_renderer_egl_init_extensions (CoglRenderer *renderer)
 
   if (cogl_check_extension ("EGL_KHR_no_config_context", split_extensions))
     cogl_renderer_set_feature (renderer,
-                              COGL_RENDERER_FEATURE_NO_CONFIG_CONTEXT,
-                              TRUE);
+                               COGL_RENDERER_FEATURE_NO_CONFIG_CONTEXT,
+                               TRUE);
 
   if (cogl_check_extension ("EGL_EXT_buffer_age", split_extensions))
     priv->private_features |= COGL_EGL_WINSYS_FEATURE_BUFFER_AGE;
@@ -417,8 +403,8 @@ cogl_renderer_egl_init_extensions (CoglRenderer *renderer)
 
   if (cogl_check_extension ("EGL_IMG_context_priority", split_extensions))
     cogl_renderer_set_feature (renderer,
-                              COGL_RENDERER_FEATURE_CONTEXT_PRIORITY,
-                              TRUE);
+                               COGL_RENDERER_FEATURE_CONTEXT_PRIORITY,
+                               TRUE);
 
   if (cogl_check_extension ("EGL_KHR_image_base", split_extensions))
     {
@@ -431,8 +417,8 @@ cogl_renderer_egl_init_extensions (CoglRenderer *renderer)
       GET_EGL_PROC_ADDR (eglBindWaylandDisplayWL);
       GET_EGL_PROC_ADDR (eglQueryWaylandBufferWL);
       cogl_renderer_set_feature (renderer,
-                                COGL_RENDERER_FEATURE_WAYLAND_BUFFER,
-                                TRUE);
+                                 COGL_RENDERER_FEATURE_WAYLAND_BUFFER,
+                                 TRUE);
     }
 
   if (cogl_check_extension ("EGL_EXT_image_dma_buf_import_modifiers", split_extensions))
@@ -440,8 +426,8 @@ cogl_renderer_egl_init_extensions (CoglRenderer *renderer)
       GET_EGL_PROC_ADDR (eglQueryDmaBufFormatsEXT);
       GET_EGL_PROC_ADDR (eglQueryDmaBufModifiersEXT);
       cogl_renderer_set_feature (renderer,
-                                COGL_RENDERER_FEATURE_DMA_BUF_MODIFIERS,
-                                TRUE);
+                                 COGL_RENDERER_FEATURE_DMA_BUF_MODIFIERS,
+                                 TRUE);
     }
 
   GET_EGL_PROC_ADDR (eglCreateSync);
@@ -639,7 +625,7 @@ cogl_renderer_egl_connect (CoglRenderer   *renderer,
       return FALSE;
     }
 
-  cogl_renderer_egl_init_extensions (renderer);
+  cogl_renderer_egl_init_extensions (renderer_egl);
 
   cogl_renderer_egl_detect_hardware_rendering (renderer_egl);
 
@@ -674,38 +660,6 @@ cogl_renderer_egl_create_dma_buf_framebuffer (CoglRenderer     *renderer,
                    "Creating textures from EGL images is not supported");
       return NULL;
     }
-
-#ifdef HAVE_VULKAN
-  if (cogl_renderer_get_driver_id (renderer) == COGL_DRIVER_ID_VULKAN)
-    {
-      cogl_tex = cogl_texture_2d_vk_new_from_dmabuf (context,
-                                                     (int) width,
-                                                     (int) height,
-                                                     cogl_format,
-                                                     drm_format,
-                                                     n_planes,
-                                                     fds,
-                                                     strides,
-                                                     offsets,
-                                                     modifiers,
-                                                     COGL_YUV_MATRIX_BT709,
-                                                     COGL_YUV_RANGE_NARROW,
-                                                     error);
-      if (!cogl_tex)
-        return NULL;
-
-      cogl_fbo = cogl_offscreen_new_with_texture (cogl_tex);
-      g_object_unref (cogl_tex);
-
-      if (!cogl_framebuffer_allocate (COGL_FRAMEBUFFER (cogl_fbo), error))
-        {
-          g_object_unref (cogl_fbo);
-          return NULL;
-        }
-
-      return COGL_FRAMEBUFFER (cogl_fbo);
-    }
-#endif
 
   egl_image = cogl_renderer_egl_create_dmabuf_image (renderer_egl,
                                                      width,
@@ -756,17 +710,6 @@ cogl_renderer_egl_get_sync_fd (CoglRenderer *renderer)
     cogl_renderer_egl_get_instance_private (renderer_egl);
   int fd;
 
-#ifdef HAVE_VULKAN
-  if (cogl_renderer_get_driver_id (renderer) == COGL_DRIVER_ID_VULKAN)
-    {
-      CoglDriver *driver = cogl_renderer_get_driver (renderer);
-
-      if (COGL_IS_DRIVER_VK (driver))
-        return cogl_driver_vk_get_latest_sync_fd (COGL_DRIVER_VK (driver));
-      return -1;
-    }
-#endif
-
   if (!priv->eglDupNativeFenceFDANDROID)
     return -1;
 
@@ -784,12 +727,6 @@ cogl_renderer_egl_update_sync (CoglRenderer *renderer)
   CoglRendererEGLPrivate *priv =
     cogl_renderer_egl_get_instance_private (renderer_egl);
 
-#ifdef HAVE_VULKAN
-  /* Vulkan framebuffer flush already exported SYNC_FD into the driver. */
-  if (cogl_renderer_get_driver_id (renderer) == COGL_DRIVER_ID_VULKAN)
-    return;
-#endif
-
   if (!priv->eglDestroySyncKHR || !priv->eglCreateSyncKHR)
     return;
 
@@ -799,30 +736,62 @@ cogl_renderer_egl_update_sync (CoglRenderer *renderer)
   priv->sync = priv->eglCreateSyncKHR (priv->edisplay,
                                        EGL_SYNC_NATIVE_FENCE_ANDROID, NULL);
 }
-#else
-#ifdef HAVE_VULKAN
-static int
-cogl_renderer_egl_get_sync_fd (CoglRenderer *renderer)
+#endif
+
+static CoglDisplay *
+cogl_renderer_egl_create_display (CoglRenderer *renderer)
 {
-  CoglDriver *driver;
-
-  if (cogl_renderer_get_driver_id (renderer) != COGL_DRIVER_ID_VULKAN)
-    return -1;
-
-  driver = cogl_renderer_get_driver (renderer);
-  if (!COGL_IS_DRIVER_VK (driver))
-    return -1;
-
-  return cogl_driver_vk_get_latest_sync_fd (COGL_DRIVER_VK (driver));
+  return COGL_DISPLAY (cogl_display_egl_new (renderer));
 }
 
-static void
-cogl_renderer_egl_update_sync (CoglRenderer *renderer)
+static gboolean
+cogl_renderer_egl_query_drm_device (CoglRenderer  *renderer,
+                                    dev_t         *device_id,
+                                    GError       **error)
 {
-  (void) renderer;
+  CoglRendererEGL *renderer_egl = COGL_RENDERER_EGL (renderer);
+  EGLAttrib attrib;
+  EGLDeviceEXT device;
+  const char *path = NULL;
+  struct stat device_stat;
+
+  if (!cogl_renderer_egl_query_display_attrib (renderer_egl, EGL_DEVICE_EXT,
+                                               &attrib, error))
+    return FALSE;
+
+  device = (EGLDeviceEXT) attrib;
+  if (cogl_renderer_egl_device_has_extensions (renderer_egl, device, NULL,
+                                               "EGL_EXT_device_drm_render_node",
+                                               NULL))
+    cogl_renderer_egl_query_device_string (renderer_egl, device,
+                                           EGL_DRM_RENDER_NODE_FILE_EXT,
+                                           &path, NULL);
+
+  if (!path && cogl_renderer_egl_device_has_extensions (renderer_egl,
+                                                        device, NULL,
+                                                        "EGL_EXT_device_drm",
+                                                        NULL))
+    cogl_renderer_egl_query_device_string (renderer_egl, device,
+                                           EGL_DRM_DEVICE_FILE_EXT,
+                                           &path, NULL);
+
+  if (!path)
+    {
+      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                           "EGL device has no DRM node");
+      return FALSE;
+    }
+
+  if (stat (path, &device_stat) != 0)
+    {
+      g_set_error (error, G_IO_ERROR, g_io_error_from_errno (errno),
+                   "Failed to stat DRM device: %s", g_strerror (errno));
+      return FALSE;
+    }
+
+  *device_id = device_stat.st_rdev;
+  return TRUE;
 }
-#endif
-#endif
 
 static void
 cogl_renderer_egl_class_init (CoglRendererEGLClass *class)
@@ -831,6 +800,8 @@ cogl_renderer_egl_class_init (CoglRendererEGLClass *class)
     COGL_RENDERER_CLASS (class);
   GObjectClass *object_class = G_OBJECT_CLASS (class);
 
+  renderer_class->query_drm_device = cogl_renderer_egl_query_drm_device;
+  renderer_class->create_display = cogl_renderer_egl_create_display;
   renderer_class->bind_api = cogl_renderer_egl_bind_api;
   renderer_class->load_driver = cogl_renderer_egl_load_driver;
   renderer_class->get_proc_address = cogl_renderer_egl_get_proc_address;
@@ -843,7 +814,7 @@ cogl_renderer_egl_class_init (CoglRendererEGLClass *class)
     cogl_renderer_egl_query_dma_buf_modifiers;
   renderer_class->is_hardware_accelerated = cogl_renderer_egl_is_hardware_accelerated;
 
-#if defined(EGL_KHR_fence_sync) || defined(EGL_KHR_reusable_sync) || defined(HAVE_VULKAN)
+#if defined(EGL_KHR_fence_sync) || defined(EGL_KHR_reusable_sync)
   renderer_class->get_sync_fd = cogl_renderer_egl_get_sync_fd;
   renderer_class->update_sync = cogl_renderer_egl_update_sync;
 #endif

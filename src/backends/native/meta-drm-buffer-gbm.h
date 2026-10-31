@@ -42,3 +42,7 @@ MetaDrmBufferGbm * meta_drm_buffer_gbm_new_take (MetaDeviceFile      *device_fil
                                                  GError             **error);
 
 struct gbm_bo * meta_drm_buffer_gbm_get_bo (MetaDrmBufferGbm *buffer_gbm);
+
+CoglTexture * meta_drm_buffer_gbm_import_texture (MetaDrmBufferGbm  *buffer_gbm,
+                                                  CoglContext       *context,
+                                                  GError           **error);

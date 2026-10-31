@@ -105,6 +105,12 @@ cogl_vk_driver_sources = [
   'driver/vk/cogl-framebuffer-vk-private.h',
   'driver/vk/cogl-framebuffer-vk.c',
   'driver/vk/cogl-driver-vk-private.h',
+  'driver/vk/cogl-renderer-vk-private.h',
+  'driver/vk/cogl-renderer-vk.c',
+  'driver/vk/cogl-display-vk-private.h',
+  'driver/vk/cogl-display-vk.c',
+  'driver/vk/cogl-context-vk-private.h',
+  'driver/vk/cogl-context-vk.c',
   'driver/vk/cogl-driver-vk.c',
 ]
 
@@ -325,6 +331,7 @@ if have_egl
     'cogl-renderer-egl.c',
     'cogl-renderer-egl-private.h',
     'winsys/cogl-onscreen-egl.c',
+    'winsys/cogl-onscreen-egl-private.h',
     'winsys/cogl-onscreen-egl.h',
   ]
 endif

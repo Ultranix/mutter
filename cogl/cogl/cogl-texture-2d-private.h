@@ -58,6 +58,14 @@ struct _CoglTexture2DClass
                                   int              dst_y,
                                   int              level);
 
+  gboolean (* set_yuv_colorimetry) (CoglTexture2D  *texture,
+                                    CoglYuvMatrix   matrix,
+                                    CoglYuvRange    range,
+                                    GError        **error);
+
+  void (* set_acquire_sync_fd) (CoglTexture2D *texture,
+                                int            sync_fd);
+
   void (* generate_mipmap) (CoglTexture2D *tex_2d);
 
   gboolean (* copy_from_bitmap) (CoglTexture2D  *tex_2d,

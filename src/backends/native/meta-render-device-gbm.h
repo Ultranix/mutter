@@ -30,3 +30,6 @@ MetaRenderDeviceGbm * meta_render_device_gbm_new (MetaBackend     *backend,
                                                   GError         **error);
 
 struct gbm_device * meta_render_device_gbm_get_gbm_device (MetaRenderDeviceGbm *render_device_gbm);
+
+CoglRendererEGL * meta_render_device_gbm_create_egl_renderer (MetaRenderDeviceGbm  *render_device_gbm,
+                                                              GError              **error);

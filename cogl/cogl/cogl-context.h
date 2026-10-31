@@ -221,4 +221,16 @@ void cogl_context_set_winsys_feature (CoglContext      *context,
                                       gboolean          value);
 
 
+/**
+ * cogl_context_consume_frame_error:
+ * @context: A Cogl context
+ *
+ * Clears any recorded frame submission failure. A device loss continues to
+ * report failure until the context is replaced.
+ *
+ * Returns: Whether frame submission failed or the device was lost
+ */
+COGL_EXPORT gboolean
+cogl_context_consume_frame_error (CoglContext *context);
+
 G_END_DECLS

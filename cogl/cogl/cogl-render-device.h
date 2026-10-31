@@ -56,6 +56,8 @@ struct _CoglRenderDeviceClass
 {
   GObjectClass parent_class;
 
+  int (* get_drm_fd) (CoglRenderDevice *render_device);
+
   GArray * (* query_drm_modifiers) (CoglRenderDevice       *render_device,
                                     CoglPixelFormat         format,
                                     CoglDrmModifierFilter   filter,
@@ -122,5 +124,15 @@ cogl_render_device_create_dma_buf (CoglRenderDevice  *render_device,
                                    int                width,
                                    int                height,
                                    GError           **error);
+
+/**
+ * cogl_render_device_get_drm_fd: (skip)
+ * @render_device: A render device
+ *
+ * Returns: A borrowed DRM file descriptor, or -1 if unavailable. The caller
+ *   must not close the descriptor.
+ */
+COGL_EXPORT int
+cogl_render_device_get_drm_fd (CoglRenderDevice *render_device);
 
 G_END_DECLS

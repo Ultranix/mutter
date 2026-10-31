@@ -50,6 +50,21 @@ struct _CoglFramebufferDriverClass
 {
   GObjectClass parent_cleass;
 
+  gboolean (* blit) (CoglFramebufferDriver *driver,
+                     CoglFramebufferDriver *destination,
+                     int                    src_x1,
+                     int                    src_y1,
+                     int                    src_x2,
+                     int                    src_y2,
+                     int                    dst_x1,
+                     int                    dst_y1,
+                     int                    dst_x2,
+                     int                    dst_y2,
+                     GError               **error);
+
+  void (* adopt_targets) (CoglFramebufferDriver *driver,
+                          CoglFramebufferDriver *source);
+
   void (* query_bits) (CoglFramebufferDriver *driver,
                        CoglFramebufferBits   *bits);
 

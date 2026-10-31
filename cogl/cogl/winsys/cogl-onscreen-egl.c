@@ -26,6 +26,7 @@
 #include "config.h"
 
 #include "cogl/winsys/cogl-onscreen-egl.h"
+#include "cogl/winsys/cogl-onscreen-egl-private.h"
 
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
@@ -45,13 +46,11 @@ typedef struct _CoglOnscreenEglPrivate
 G_DEFINE_TYPE_WITH_PRIVATE (CoglOnscreenEgl, cogl_onscreen_egl,
                             COGL_TYPE_ONSCREEN)
 
-static void
-cogl_onscreen_egl_dispose (GObject *object)
+void
+cogl_onscreen_egl_destroy_surface (CoglOnscreen *onscreen,
+                                   EGLSurface    surface)
 {
-  CoglOnscreenEgl *onscreen_egl = COGL_ONSCREEN_EGL (object);
-  CoglOnscreenEglPrivate *priv =
-    cogl_onscreen_egl_get_instance_private (onscreen_egl);
-  CoglFramebuffer *framebuffer = COGL_FRAMEBUFFER (object);
+  CoglFramebuffer *framebuffer = COGL_FRAMEBUFFER (onscreen);
   CoglContext *context = cogl_framebuffer_get_context (framebuffer);
   CoglDisplay *display = cogl_context_get_display (context);
   CoglDisplayEGL *display_egl = COGL_DISPLAY_EGL (display);
@@ -60,16 +59,16 @@ cogl_onscreen_egl_dispose (GObject *object)
   EGLDisplay edpy = cogl_renderer_egl_get_edisplay (renderer_egl);
   EGLSurface dummy_surface = cogl_display_egl_get_dummy_surface (display_egl);
 
-  if (priv->egl_surface != EGL_NO_SURFACE)
+  if (surface != EGL_NO_SURFACE)
     {
       /* Cogl always needs a valid context bound to something so if we
        * are destroying the onscreen that is currently bound we'll
        * switch back to the dummy drawable. */
       if ((dummy_surface != EGL_NO_SURFACE ||
            cogl_renderer_egl_has_feature (renderer_egl,
-                                           COGL_EGL_WINSYS_FEATURE_SURFACELESS_CONTEXT)) &&
-          (cogl_display_egl_get_current_draw_surface (display_egl) == priv->egl_surface ||
-           cogl_display_egl_get_current_read_surface (display_egl) == priv->egl_surface))
+                                          COGL_EGL_WINSYS_FEATURE_SURFACELESS_CONTEXT)) &&
+          (cogl_display_egl_get_current_draw_surface (display_egl) == surface ||
+           cogl_display_egl_get_current_read_surface (display_egl) == surface))
         {
           cogl_display_egl_make_current (display_egl,
                                          dummy_surface,
@@ -77,29 +76,38 @@ cogl_onscreen_egl_dispose (GObject *object)
                                          cogl_display_egl_get_current_context (display_egl));
         }
 
-      if (eglDestroySurface (edpy, priv->egl_surface)
+      if (eglDestroySurface (edpy, surface)
           == EGL_FALSE)
         g_warning ("Failed to destroy EGL surface");
-      priv->egl_surface = EGL_NO_SURFACE;
     }
+
+}
+
+static void
+cogl_onscreen_egl_dispose (GObject *object)
+{
+  CoglOnscreenEgl *onscreen_egl = COGL_ONSCREEN_EGL (object);
+  CoglOnscreenEglPrivate *priv =
+    cogl_onscreen_egl_get_instance_private (onscreen_egl);
+
+  cogl_onscreen_egl_destroy_surface (COGL_ONSCREEN (object), priv->egl_surface);
+  priv->egl_surface = EGL_NO_SURFACE;
 
   G_OBJECT_CLASS (cogl_onscreen_egl_parent_class)->dispose (object);
 }
 
-static void
-bind_onscreen_with_context (CoglOnscreen *onscreen,
-                            EGLContext egl_context)
+void
+cogl_onscreen_egl_bind_surface (CoglOnscreen *onscreen,
+                                EGLSurface    surface,
+                                EGLContext    egl_context)
 {
-  CoglOnscreenEgl *onscreen_egl = COGL_ONSCREEN_EGL (onscreen);
-  CoglOnscreenEglPrivate *priv =
-    cogl_onscreen_egl_get_instance_private (onscreen_egl);
   CoglFramebuffer *framebuffer = COGL_FRAMEBUFFER (onscreen);
   CoglContext *context = cogl_framebuffer_get_context (framebuffer);
   CoglDisplay *display = cogl_context_get_display (context);
 
   gboolean status = cogl_display_egl_make_current (COGL_DISPLAY_EGL (display),
-                                                   priv->egl_surface,
-                                                   priv->egl_surface,
+                                                   surface,
+                                                   surface,
                                                    egl_context);
   if (status)
     {
@@ -119,20 +127,20 @@ cogl_onscreen_egl_bind (CoglOnscreen *onscreen)
   CoglDisplay *display = cogl_context_get_display (context);
   CoglDisplayEGL *display_egl = COGL_DISPLAY_EGL (display);
 
-  bind_onscreen_with_context (onscreen,
-                              cogl_display_egl_get_egl_context (display_egl));
+  cogl_onscreen_egl_bind_surface (onscreen,
+                                  cogl_onscreen_egl_get_egl_surface (
+                                    COGL_ONSCREEN_EGL (onscreen)),
+                                  cogl_display_egl_get_egl_context (display_egl));
 }
 
 #ifndef EGL_BUFFER_AGE_EXT
 #define EGL_BUFFER_AGE_EXT 0x313D
 #endif
 
-static int
-cogl_onscreen_egl_get_buffer_age (CoglOnscreen *onscreen)
+int
+cogl_onscreen_egl_get_buffer_age_surface (CoglOnscreen *onscreen,
+                                          EGLSurface    surface)
 {
-  CoglOnscreenEgl *onscreen_egl = COGL_ONSCREEN_EGL (onscreen);
-  CoglOnscreenEglPrivate *priv =
-    cogl_onscreen_egl_get_instance_private (onscreen_egl);
   CoglFramebuffer *framebuffer = COGL_FRAMEBUFFER (onscreen);
   CoglContext *context = cogl_framebuffer_get_context (framebuffer);
   CoglRenderer *renderer = cogl_context_get_renderer (context);
@@ -140,7 +148,6 @@ cogl_onscreen_egl_get_buffer_age (CoglOnscreen *onscreen)
   EGLDisplay edpy = cogl_renderer_egl_get_edisplay (renderer_egl);
   CoglDisplay *display = cogl_context_get_display (context);
   CoglDisplayEGL *display_egl = COGL_DISPLAY_EGL (display);
-  EGLSurface surface = priv->egl_surface;
   static gboolean warned = FALSE;
   int age = 0;
 
@@ -148,7 +155,7 @@ cogl_onscreen_egl_get_buffer_age (CoglOnscreen *onscreen)
     return 0;
 
   if (!cogl_display_egl_make_current (display_egl,
-				      surface, surface,
+                                      surface, surface,
                                       cogl_display_egl_get_egl_context (display_egl)))
     return 0;
 
@@ -166,15 +173,22 @@ cogl_onscreen_egl_get_buffer_age (CoglOnscreen *onscreen)
   return age;
 }
 
-static gboolean
-cogl_onscreen_egl_swap_region (CoglOnscreen    *onscreen,
-                               const MtkRegion *region,
-                               CoglFrameInfo   *info,
-                               gpointer         user_data)
+static int
+cogl_onscreen_egl_get_buffer_age (CoglOnscreen *onscreen)
 {
-  CoglOnscreenEgl *onscreen_egl = COGL_ONSCREEN_EGL (onscreen);
-  CoglOnscreenEglPrivate *priv =
-    cogl_onscreen_egl_get_instance_private (onscreen_egl);
+  EGLSurface surface = cogl_onscreen_egl_get_egl_surface (
+    COGL_ONSCREEN_EGL (onscreen));
+
+  return cogl_onscreen_egl_get_buffer_age_surface (onscreen, surface);
+}
+
+gboolean
+cogl_onscreen_egl_swap_region_surface (CoglOnscreen    *onscreen,
+                                       EGLSurface       surface,
+                                       const MtkRegion *region,
+                                       CoglFrameInfo   *info,
+                                       gpointer         user_data)
+{
   CoglFramebuffer *framebuffer = COGL_FRAMEBUFFER (onscreen);
   CoglContext *context = cogl_framebuffer_get_context (framebuffer);
   CoglRenderer *renderer = cogl_context_get_renderer (context);
@@ -199,13 +213,13 @@ cogl_onscreen_egl_swap_region (CoglOnscreen    *onscreen,
                                         COGL_FRAMEBUFFER_STATE_BIND);
 
   if (!cogl_renderer_egl_swap_buffers_region (renderer_egl,
-                                              priv->egl_surface,
+                                              surface,
                                               n_rectangles,
                                               egl_rectangles,
                                               &error))
     {
       g_warning ("Error reported by eglSwapBuffersRegion: %s",
-                  error ? error->message : "unknown");
+                 error ? error->message : "unknown");
       return FALSE;
     }
 
@@ -215,13 +229,23 @@ cogl_onscreen_egl_swap_region (CoglOnscreen    *onscreen,
   return TRUE;
 }
 
-static void
-cogl_onscreen_egl_queue_damage_region (CoglOnscreen    *onscreen,
-                                       const MtkRegion *region)
+static gboolean
+cogl_onscreen_egl_swap_region (CoglOnscreen    *onscreen,
+                               const MtkRegion *region,
+                               CoglFrameInfo   *info,
+                               gpointer         user_data)
 {
-  CoglOnscreenEgl *onscreen_egl = COGL_ONSCREEN_EGL (onscreen);
-  CoglOnscreenEglPrivate *priv =
-    cogl_onscreen_egl_get_instance_private (onscreen_egl);
+  EGLSurface surface = cogl_onscreen_egl_get_egl_surface (
+    COGL_ONSCREEN_EGL (onscreen));
+
+  return cogl_onscreen_egl_swap_region_surface (onscreen, surface, region, info, user_data);
+}
+
+void
+cogl_onscreen_egl_queue_damage_region_surface (CoglOnscreen    *onscreen,
+                                               EGLSurface       surface,
+                                               const MtkRegion *region)
+{
   CoglFramebuffer *framebuffer = COGL_FRAMEBUFFER (onscreen);
   CoglContext *context = cogl_framebuffer_get_context (framebuffer);
   CoglRenderer *renderer = cogl_context_get_renderer (context);
@@ -243,21 +267,29 @@ cogl_onscreen_egl_queue_damage_region (CoglOnscreen    *onscreen,
                                 egl_rectangles);
 
   if (!cogl_renderer_egl_set_damage_region (renderer_egl,
-                                            priv->egl_surface,
+                                            surface,
                                             egl_rectangles,
                                             n_rectangles))
     g_warning ("Error reported by eglSetDamageRegion");
 }
 
-static gboolean
-cogl_onscreen_egl_swap_buffers_with_damage (CoglOnscreen    *onscreen,
-                                            const MtkRegion *region,
-                                            CoglFrameInfo   *info,
-                                            gpointer         user_data)
+static void
+cogl_onscreen_egl_queue_damage_region (CoglOnscreen    *onscreen,
+                                       const MtkRegion *region)
 {
-  CoglOnscreenEgl *onscreen_egl = COGL_ONSCREEN_EGL (onscreen);
-  CoglOnscreenEglPrivate *priv =
-    cogl_onscreen_egl_get_instance_private (onscreen_egl);
+  EGLSurface surface = cogl_onscreen_egl_get_egl_surface (
+    COGL_ONSCREEN_EGL (onscreen));
+
+  cogl_onscreen_egl_queue_damage_region_surface (onscreen, surface, region);
+}
+
+gboolean
+cogl_onscreen_egl_swap_buffers_with_damage_surface (CoglOnscreen    *onscreen,
+                                                    EGLSurface       surface,
+                                                    const MtkRegion *region,
+                                                    CoglFrameInfo   *info,
+                                                    gpointer         user_data)
+{
   CoglFramebuffer *framebuffer = COGL_FRAMEBUFFER (onscreen);
   CoglContext *context = cogl_framebuffer_get_context (framebuffer);
   CoglRenderer *renderer = cogl_context_get_renderer (context);
@@ -290,7 +322,7 @@ cogl_onscreen_egl_swap_buffers_with_damage (CoglOnscreen    *onscreen,
                                     egl_rectangles);
 
       if (!cogl_renderer_egl_swap_buffers_with_damage (renderer_egl,
-                                                       priv->egl_surface,
+                                                       surface,
                                                        egl_rectangles,
                                                        n_rectangles,
                                                        &error))
@@ -300,7 +332,7 @@ cogl_onscreen_egl_swap_buffers_with_damage (CoglOnscreen    *onscreen,
           return FALSE;
         }
     }
-  else if (eglSwapBuffers (egl_display, priv->egl_surface) == EGL_FALSE)
+  else if (eglSwapBuffers (egl_display, surface) == EGL_FALSE)
     {
       g_warning ("Error 0x%x reported by eglSwapBuffers",
                  (unsigned int) eglGetError ());
@@ -311,6 +343,18 @@ cogl_onscreen_egl_swap_buffers_with_damage (CoglOnscreen    *onscreen,
   cogl_framebuffer_flush (framebuffer);
 
   return TRUE;
+}
+
+static gboolean
+cogl_onscreen_egl_swap_buffers_with_damage (CoglOnscreen    *onscreen,
+                                            const MtkRegion *region,
+                                            CoglFrameInfo   *info,
+                                            gpointer         user_data)
+{
+  EGLSurface surface = cogl_onscreen_egl_get_egl_surface (
+    COGL_ONSCREEN_EGL (onscreen));
+
+  return cogl_onscreen_egl_swap_buffers_with_damage_surface (onscreen, surface, region, info, user_data);
 }
 
 void

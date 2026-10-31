@@ -39,9 +39,14 @@ meta_render_device_surfaceless_create_renderer (MetaRenderDevice  *render_device
   CoglRendererEGL *renderer_egl;
   EGLDisplay egl_display;
 
-  renderer = g_object_new (COGL_TYPE_RENDERER_EGL,
-                           "render-device", render_device,
-                           NULL);
+  renderer = cogl_renderer_new (COGL_RENDER_DEVICE (render_device));
+  if (!COGL_IS_RENDERER_EGL (renderer))
+    {
+      if (!cogl_renderer_connect (renderer, error))
+        return NULL;
+
+      return g_steal_pointer (&renderer);
+    }
   renderer_egl = COGL_RENDERER_EGL (renderer);
 
   if (!cogl_renderer_egl_has_client_extensions (renderer_egl, NULL,

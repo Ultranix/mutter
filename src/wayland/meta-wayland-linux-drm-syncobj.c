@@ -465,12 +465,11 @@ meta_wayland_drm_syncobj_manager_new (MetaWaylandCompositor *compositor,
   MetaBackend *backend = meta_context_get_backend (context);
   ClutterBackend *clutter_backend = meta_backend_get_clutter_backend (backend);
   CoglContext *cogl_context = clutter_backend_get_cogl_context (clutter_backend);
-  CoglRendererEGL *renderer_egl =
-    COGL_RENDERER_EGL (cogl_context_get_renderer (cogl_context));
+  CoglRenderer *renderer = cogl_context_get_renderer (cogl_context);
   MetaWaylandDrmSyncobjManager *drm_syncobj_manager;
-  EGLDeviceEXT egl_device;
+  drmDevicePtr drm_device = NULL;
+  dev_t device_id;
   g_autofd int drm_fd = -1;
-  EGLAttrib attrib;
   uint64_t timeline_supported = false;
   const char *device_path = NULL;
 
@@ -479,55 +478,33 @@ meta_wayland_drm_syncobj_manager_new (MetaWaylandCompositor *compositor,
   if (!cogl_context_has_winsys_feature (cogl_context, COGL_WINSYS_FEATURE_SYNC_FD))
     {
       g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
-                   "Missing 'EGL_ANDROID_native_fence_sync'");
+                   "Renderer does not support sync-file export");
       return NULL;
     }
 
-  if (!cogl_renderer_egl_query_display_attrib (renderer_egl,
-                                               EGL_DEVICE_EXT, &attrib,
-                                               error))
+  if (!cogl_renderer_query_drm_device (renderer, &device_id, error))
     return NULL;
 
-  egl_device = (EGLDeviceEXT) attrib;
-
-  if (cogl_renderer_egl_device_has_extensions (renderer_egl, egl_device, NULL,
-                                               "EGL_EXT_device_drm_render_node",
-                                               NULL))
+  if (drmGetDeviceFromDevId (device_id, 0, &drm_device) != 0)
     {
-      if (!cogl_renderer_egl_query_device_string (renderer_egl, egl_device,
-                                                  EGL_DRM_RENDER_NODE_FILE_EXT,
-                                                  &device_path, error))
-        return NULL;
-    }
-
-  if (!device_path &&
-      cogl_renderer_egl_device_has_extensions (renderer_egl, egl_device, NULL,
-                                               "EGL_EXT_device_drm",
-                                               NULL))
-    {
-      if (!cogl_renderer_egl_query_device_string (renderer_egl, egl_device,
-                                                  EGL_DRM_DEVICE_FILE_EXT,
-                                                  &device_path, error))
-        return NULL;
-    }
-
-  if (!device_path)
-    {
-      g_set_error (error,
-                   G_IO_ERROR,
-                   G_IO_ERROR_NOT_SUPPORTED,
-                   "Failed to find EGL device to initialize linux-drm-syncobj-v1");
+      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND,
+                           "Failed to find renderer DRM device");
       return NULL;
     }
 
-  drm_fd = open (device_path, O_RDWR | O_CLOEXEC);
+  if (drm_device->available_nodes & (1 << DRM_NODE_RENDER))
+    device_path = drm_device->nodes[DRM_NODE_RENDER];
+  else if (drm_device->available_nodes & (1 << DRM_NODE_PRIMARY))
+    device_path = drm_device->nodes[DRM_NODE_PRIMARY];
+
+  if (device_path)
+    drm_fd = open (device_path, O_RDWR | O_CLOEXEC);
+  drmFreeDevice (&drm_device);
+
   if (drm_fd < 0)
     {
-      g_set_error (error,
-                   G_IO_ERROR,
-                   G_IO_ERROR_FAILED,
-                   "Failed to open DRM device %s",
-                   device_path);
+      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                           "Failed to open renderer DRM device");
       return NULL;
     }
 
@@ -544,13 +521,13 @@ meta_wayland_drm_syncobj_manager_new (MetaWaylandCompositor *compositor,
 #ifdef HAVE_EVENTFD
   if (drmSyncobjEventfd (drm_fd, 0, 0, -1, 0) != -1 || errno != ENOENT)
 #endif
-    {
-      g_set_error (error,
-                   G_IO_ERROR,
-                   G_IO_ERROR_NOT_SUPPORTED,
-                   "drmSyncobjEventfd failed: linux-drm-syncobj requires eventfd support");
-      return NULL;
-    }
+  {
+    g_set_error (error,
+                 G_IO_ERROR,
+                 G_IO_ERROR_NOT_SUPPORTED,
+                 "drmSyncobjEventfd failed: linux-drm-syncobj requires eventfd support");
+    return NULL;
+  }
 
   drm_syncobj_manager = g_object_new (META_TYPE_WAYLAND_DRM_SYNCOBJ_MANAGER, NULL);
   drm_syncobj_manager->drm = g_steal_fd (&drm_fd);
