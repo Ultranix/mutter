@@ -142,10 +142,11 @@ export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json
 
 ## Branch layout
 
-| Branch | Contents |
-| --- | --- |
-| `vulkan-backend` (default) | Vulkan Cogl driver, native/Wayland integration, tests and docs |
-| Upstream GNOME Mutter | [gitlab.gnome.org/GNOME/mutter](https://gitlab.gnome.org/GNOME/mutter) |
+This GitHub repository is a fork of upstream Mutter. Work lives on `main`
+only: the optional Vulkan Cogl driver, native/Wayland integration, tests and
+docs are on that branch.
+
+Upstream GNOME Mutter: [gitlab.gnome.org/GNOME/mutter](https://gitlab.gnome.org/GNOME/mutter)
 
 ## Documentation
 
