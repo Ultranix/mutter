@@ -495,13 +495,20 @@ maybe_reschedule_update (ClutterFrameClock *frame_clock)
   if (frame_clock->pending_reschedule ||
       frame_clock->timelines)
     {
+      gboolean pending_reschedule = frame_clock->pending_reschedule;
+
+      /* Scheduling can defer the request again, for example when a direct
+       * scanout presentation disables triple buffering while another frame
+       * is still in flight. Consume only the old request, not that new one. */
+      frame_clock->pending_reschedule = FALSE;
+
       if (frame_clock->pending_reschedule_now)
         {
           frame_clock->pending_reschedule = FALSE;
           frame_clock->pending_reschedule_now = FALSE;
           clutter_frame_clock_schedule_update_now (frame_clock);
         }
-      else if (frame_clock->pending_reschedule ||
+      else if (pending_reschedule ||
                !frame_clock->throttle_timelines)
         {
           frame_clock->pending_reschedule = FALSE;
@@ -1995,6 +2002,8 @@ clutter_frame_clock_dispatch (ClutterFrameClock *frame_clock,
       break;
     case CLUTTER_FRAME_RESULT_IDLE:
       /* The frame was aborted; nothing to paint/present */
+      CLUTTER_NOTE (FRAME_TIMINGS, "%s frame %ld idle (nothing to paint)",
+                    frame_clock->output_name, frame_count);
       clutter_frame_clock_notify_discarded (frame_clock);
       break;
     case CLUTTER_FRAME_RESULT_IGNORED:

@@ -24,6 +24,8 @@
 #pragma once
 
 #include "cogl/cogl-pipeline.h"
+#include "cogl/cogl-pipeline-private.h"
+#include "cogl/cogl-pipeline-layer-private.h"
 
 #include <glib.h>
 
@@ -38,8 +40,7 @@ typedef enum
   COGL_VK_ASSEMBLE_VERT_VBO = 1,
 } CoglVkAssembleVertMode;
 
-/* Optional VERT_VBO layout. Arrays are borrowed for the duration of assembly.
- */
+/* Optional VERT_VBO layout. Arrays are borrowed for the duration of assembly. */
 typedef struct _CoglVkAssembleVboAttrs
 {
   gboolean flat_varyings;
@@ -88,8 +89,8 @@ void cogl_vk_assemble_result_clear (CoglVkAssembleResult *result);
  * vbo_attrs may be NULL (PUSH_QUAD / no CUSTOM). For VERT_VBO, pass
  * mask-derived
  * NORMAL/CUSTOM so locations match cogl-pipeline-vk-vbo-private.h.
- * Returns FALSE on unsupported combine/hook with error set.
- */
+ * Returns FALSE on unsupported combine/hook with error set. */
+COGL_EXPORT_TEST
 gboolean cogl_vk_assemble_pipeline_glsl (CoglPipeline                 *pipeline,
                                          CoglVkAssembleVertMode        vert_mode,
                                          const CoglVkAssembleVboAttrs *vbo_attrs,
@@ -97,6 +98,11 @@ gboolean cogl_vk_assemble_pipeline_glsl (CoglPipeline                 *pipeline,
                                          GError                      **error);
 
 /* Hash fingerprint of assemble inputs (for pipeline cache key). */
+COGL_EXPORT_TEST
 char * cogl_vk_assemble_pipeline_fingerprint (CoglPipeline *pipeline);
+
+void cogl_vk_assemble_pipeline_pre_change (CoglPipeline           *pipeline,
+                                           CoglPipelineState       pipeline_change,
+                                           CoglPipelineLayerState  layer_change);
 
 G_END_DECLS

@@ -32,6 +32,8 @@ G_DECLARE_FINAL_TYPE (CoglBufferImplVk,
 
 VkBuffer cogl_buffer_impl_vk_peek_buffer (CoglBufferImplVk *impl);
 
+uint64_t cogl_buffer_impl_vk_get_content_generation (CoglBufferImplVk *impl);
+
 gboolean cogl_buffer_impl_vk_ensure (CoglBufferImplVk *impl,
                                      CoglBuffer       *buffer,
                                      GError          **error);

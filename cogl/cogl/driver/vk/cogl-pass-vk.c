@@ -35,6 +35,7 @@ typedef struct
   CoglVkImage *image;
   VkImageLayout layout;
   gboolean graphics_owned;
+  gboolean shader_read_synced;
 } ImageState;
 
 void
@@ -48,7 +49,8 @@ cogl_vk_pass_note_image_state (CoglVkPass  *pass,
   for (unsigned int i = 0; i < pass->image_states->len; i++)
     if (g_array_index (pass->image_states, ImageState, i).image == image)
       return;
-  state = (ImageState) { image, image->layout, image->dmabuf_graphics_owned };
+  state = (ImageState) { image, image->layout, image->dmabuf_graphics_owned,
+                         image->shader_read_synced };
   g_array_append_val (pass->image_states, state);
 }
 
@@ -62,6 +64,7 @@ restore_image_states (CoglVkPass *pass)
       ImageState *state = &g_array_index (pass->image_states, ImageState, i);
       state->image->layout = state->layout;
       state->image->dmabuf_graphics_owned = state->graphics_owned;
+      state->image->shader_read_synced = state->shader_read_synced;
     }
 }
 
@@ -366,8 +369,13 @@ cogl_vk_pass_submit (CoglVkPass *pass,
     }
 
   pass->submitted = TRUE;
+  pass->fence->submit_serial = ++pass->device->submit_serial;
   if (pass->fence->timeline != VK_NULL_HANDLE)
     pass->fence->point = next_point;
+  cogl_vk_device_gpu_trace_note_submit (pass->device, pass->timestamp_begin,
+                                        pass->timestamp_end,
+                                        pass->fence->timeline,
+                                        pass->fence->point);
 
   if (pass->device->owner && pass->fence)
     cogl_vk_pipeline_cache_note_submit (
@@ -469,10 +477,21 @@ cogl_vk_pass_free (CoglVkPass *pass)
    * not vkQueueWaitIdle: the CB is freed once the timeline point is observed
    * signaled. This needs the timeline to track completion. Without it (opt
    * extension absent), or when the ticket was already flagged signaled by a
-   * fallback path, fall back to the safe blocking free below.
-   */
+   * fallback path, fall back to the safe blocking free below. */
   if (pass->fence && !pass->submitted)
-    pass->fence->signaled_cached = TRUE;
+    {
+      /* Retirement may cover uses in earlier submissions as well as this
+       * recording. Discarding the recording does not complete that work. */
+      if (pass->fence->retired.handles || pass->fence->retired.images)
+        {
+          VkResult res = vkQueueWaitIdle (pass->device->graphics_queue);
+
+          cogl_vk_device_note_vk_result (pass->device, res);
+          if (res != VK_SUCCESS && res != VK_ERROR_DEVICE_LOST)
+            g_error ("Cogl Vulkan: cannot retire discarded pass (%d)", (int) res);
+        }
+      pass->fence->signaled_cached = TRUE;
+    }
 
   if (pass->submitted && pass->fence && pass->command_buffer != VK_NULL_HANDLE &&
       pass->fence->timeline != VK_NULL_HANDLE)

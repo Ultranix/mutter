@@ -43,6 +43,9 @@ struct _CoglBufferImplVk
   VkBuffer buffer;
   VkDeviceMemory memory;
   gboolean device_local;
+  gboolean gpu_read;
+  uint64_t content_generation;
+  void *host_map;
 
   /* HOST_VISIBLE shadow for DEVICE_LOCAL map/set_data. */
   VkBuffer staging;
@@ -130,12 +133,29 @@ destroy_vk_buffer (CoglVkDevice    *device,
 {
   if (device)
     {
+      CoglVkRetireList *retire;
+      CoglVkRetireResult result =
+        cogl_driver_vk_retire_list (device->owner, &retire);
+
+      if (result == COGL_VK_RETIRE_DEFERRED)
+        {
+          if (*buffer != VK_NULL_HANDLE)
+            cogl_vk_retire_list_add_handle (retire, COGL_VK_RETIRED_BUFFER,
+                                            (uint64_t) *buffer);
+          if (*memory != VK_NULL_HANDLE)
+            cogl_vk_retire_list_add_handle (retire, COGL_VK_RETIRED_MEMORY,
+                                            (uint64_t) *memory);
+          *buffer = VK_NULL_HANDLE;
+          *memory = VK_NULL_HANDLE;
+          return;
+        }
+
       /* Recording CBs that bind this buffer are invalidated on destroy;
-       * WaitIdle does not cover unsubmitted recording state.
-       */
-      if (device->owner)
+       * WaitIdle does not cover unsubmitted recording state. */
+      if (result == COGL_VK_RETIRE_UNAVAILABLE && device->owner)
         cogl_driver_vk_flush_current_pass (device->owner);
-      if ((*buffer != VK_NULL_HANDLE || *memory != VK_NULL_HANDLE) &&
+      if (result == COGL_VK_RETIRE_UNAVAILABLE &&
+          (*buffer != VK_NULL_HANDLE || *memory != VK_NULL_HANDLE) &&
           device->graphics_queue != VK_NULL_HANDLE)
         {
           VkResult res = vkQueueWaitIdle (device->graphics_queue);
@@ -283,10 +303,14 @@ copy_buffers_oneshot (CoglBuffer      *buffer,
       return FALSE;
     }
 
-  if (!flush_current_pass_for_copy (driver_vk, error))
+  /* Uploads must finish recorded readers before changing their storage.
+   * Readback of a vertex/unpack buffer only reads data written by earlier
+   * uploads: recording passes do not write these buffers. Keep the borrowed
+   * draw pass alive when vertex snapshot preparation maps a static buffer. */
+  if (to_device && !flush_current_pass_for_copy (driver_vk, error))
     return FALSE;
 
-  cb_alloc.commandPool = device->command_pool;
+  cb_alloc.commandPool = device->oneshot_command_pool;
   cb_alloc.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
   cb_alloc.commandBufferCount = 1;
   res = vkAllocateCommandBuffers (device->device, &cb_alloc, &cmd);
@@ -365,194 +389,11 @@ out:
   if (fence != VK_NULL_HANDLE)
     vkDestroyFence (device->device, fence, NULL);
   if (cmd != VK_NULL_HANDLE)
-    vkFreeCommandBuffers (device->device, device->command_pool, 1, &cmd);
+    vkFreeCommandBuffers (device->device, device->oneshot_command_pool, 1, &cmd);
 
   if (!ok && error && !*error)
     g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED,
                          "Vulkan buffer staging copy failed");
-  return ok;
-}
-
-static gboolean host_write_barrier_oneshot (CoglBuffer   *buffer,
-                                            VkDeviceSize  offset,
-                                            VkDeviceSize  size,
-                                            GError      **error);
-
-/* HOST_COHERENT still needs a dependency for GPU vertex/index reads
- * after prior queue work. Prefer recording into the open pass; only
- * fall back to a oneshot submit when no pass is recording (flushing the
- * current pass mid-frame was dropping earlier draws).
- */
-static gboolean
-host_write_barrier (CoglBuffer   *buffer,
-                    VkDeviceSize  offset,
-                    VkDeviceSize  size,
-                    GError      **error)
-{
-  CoglVkDevice *device = peek_device (buffer);
-  CoglDriverVk *driver_vk = peek_driver_vk (buffer);
-  CoglBufferImplVk *vk_impl = COGL_BUFFER_IMPL_VK (buffer->impl);
-  VkBufferMemoryBarrier barrier;
-  VkCommandBuffer cmd;
-
-  if (!device || vk_impl->buffer == VK_NULL_HANDLE)
-    {
-      g_set_error_literal (error, COGL_SYSTEM_ERROR,
-                           COGL_SYSTEM_ERROR_UNSUPPORTED,
-                           "Vulkan device/buffer missing for host barrier");
-      return FALSE;
-    }
-
-  memset (&barrier, 0, sizeof (barrier));
-  barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-  barrier.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
-  barrier.dstAccessMask = VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT |
-                          VK_ACCESS_INDEX_READ_BIT |
-                          VK_ACCESS_UNIFORM_READ_BIT |
-                          VK_ACCESS_TRANSFER_READ_BIT;
-  barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-  barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-  barrier.buffer = vk_impl->buffer;
-  barrier.offset = offset;
-  barrier.size = size;
-
-  if (driver_vk && driver_vk->current_pass &&
-      driver_vk->current_pass->command_buffer != VK_NULL_HANDLE)
-    {
-      /* Must be outside a render pass for global buffer barriers. */
-      cogl_vk_pass_end_render (driver_vk->current_pass);
-      cmd = driver_vk->current_pass->command_buffer;
-      cogl_vk_debug_log ("buf",
-                         "host_barrier INLINE pass=%p buf=%p off=%llu sz=%llu",
-                         (void *) driver_vk->current_pass,
-                         (void *) buffer,
-                         (unsigned long long) offset,
-                         (unsigned long long) size);
-      vkCmdPipelineBarrier (cmd,
-                            VK_PIPELINE_STAGE_HOST_BIT,
-                            VK_PIPELINE_STAGE_VERTEX_INPUT_BIT |
-                            VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
-                            VK_PIPELINE_STAGE_TRANSFER_BIT,
-                            0, 0, NULL, 1, &barrier, 0, NULL);
-      return TRUE;
-    }
-
-  return host_write_barrier_oneshot (buffer, offset, size, error);
-}
-
-static gboolean
-host_write_barrier_oneshot (CoglBuffer   *buffer,
-                            VkDeviceSize  offset,
-                            VkDeviceSize  size,
-                            GError      **error)
-{
-  CoglVkDevice *device = peek_device (buffer);
-  CoglDriverVk *driver_vk = peek_driver_vk (buffer);
-  CoglBufferImplVk *vk_impl = COGL_BUFFER_IMPL_VK (buffer->impl);
-  VkCommandBufferAllocateInfo cb_alloc = {
-    .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-  };
-  VkCommandBufferBeginInfo begin_info = {
-    .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-    .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-  };
-  VkFenceCreateInfo fence_info = {
-    .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
-  };
-  VkCommandBuffer cmd = VK_NULL_HANDLE;
-  VkFence fence = VK_NULL_HANDLE;
-  VkSubmitInfo submit_info;
-  VkBufferMemoryBarrier barrier;
-  VkResult res;
-  gboolean ok = FALSE;
-
-  if (!device || vk_impl->buffer == VK_NULL_HANDLE)
-    {
-      g_set_error_literal (error, COGL_SYSTEM_ERROR,
-                           COGL_SYSTEM_ERROR_UNSUPPORTED,
-                           "Vulkan device/buffer missing for host barrier");
-      return FALSE;
-    }
-
-  if (!flush_current_pass_for_copy (driver_vk, error))
-    return FALSE;
-
-  cogl_vk_debug_log ("buf",
-                     "host_barrier buf=%p vk=%p off=%llu size=%llu "
-                     "pass_after_flush=%p",
-                     (void *) buffer,
-                     (void *) (uintptr_t) vk_impl->buffer,
-                     (unsigned long long) offset,
-                     (unsigned long long) size,
-                     driver_vk ? (void *) driver_vk->current_pass : NULL);
-
-  cb_alloc.commandPool = device->command_pool;
-  cb_alloc.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-  cb_alloc.commandBufferCount = 1;
-  res = vkAllocateCommandBuffers (device->device, &cb_alloc, &cmd);
-  if (res != VK_SUCCESS)
-    goto out;
-
-  res = vkBeginCommandBuffer (cmd, &begin_info);
-  if (res != VK_SUCCESS)
-    goto out;
-
-  memset (&barrier, 0, sizeof (barrier));
-  barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-  barrier.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
-  barrier.dstAccessMask = VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT |
-                          VK_ACCESS_INDEX_READ_BIT |
-                          VK_ACCESS_UNIFORM_READ_BIT |
-                          VK_ACCESS_TRANSFER_READ_BIT;
-  barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-  barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-  barrier.buffer = vk_impl->buffer;
-  barrier.offset = offset;
-  barrier.size = size;
-  vkCmdPipelineBarrier (cmd,
-                        VK_PIPELINE_STAGE_HOST_BIT,
-                        VK_PIPELINE_STAGE_VERTEX_INPUT_BIT |
-                        VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
-                        VK_PIPELINE_STAGE_TRANSFER_BIT,
-                        0, 0, NULL, 1, &barrier, 0, NULL);
-
-  res = vkEndCommandBuffer (cmd);
-  if (res != VK_SUCCESS)
-    goto out;
-
-  res = vkCreateFence (device->device, &fence_info, NULL, &fence);
-  if (res != VK_SUCCESS)
-    goto out;
-
-  memset (&submit_info, 0, sizeof (submit_info));
-  submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-  submit_info.commandBufferCount = 1;
-  submit_info.pCommandBuffers = &cmd;
-  res = vkQueueSubmit (device->graphics_queue, 1, &submit_info, fence);
-  if (res != VK_SUCCESS)
-    {
-      cogl_vk_device_note_vk_result (device, res);
-      goto out;
-    }
-
-  res = vkWaitForFences (device->device, 1, &fence, VK_TRUE, UINT64_MAX);
-  if (res != VK_SUCCESS)
-    {
-      cogl_vk_device_note_vk_result (device, res);
-      goto out;
-    }
-
-  ok = TRUE;
-
-out:
-  if (fence != VK_NULL_HANDLE)
-    vkDestroyFence (device->device, fence, NULL);
-  if (cmd != VK_NULL_HANDLE)
-    vkFreeCommandBuffers (device->device, device->command_pool, 1, &cmd);
-
-  if (!ok && error && !*error)
-    g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED,
-                         "Vulkan host buffer barrier failed");
   return ok;
 }
 
@@ -654,7 +495,14 @@ VkBuffer
 cogl_buffer_impl_vk_peek_buffer (CoglBufferImplVk *impl)
 {
   g_return_val_if_fail (COGL_IS_BUFFER_IMPL_VK (impl), VK_NULL_HANDLE);
+  impl->gpu_read = TRUE;
   return impl->buffer;
+}
+
+uint64_t
+cogl_buffer_impl_vk_get_content_generation (CoglBufferImplVk *impl)
+{
+  return impl->content_generation;
 }
 
 gboolean
@@ -688,16 +536,85 @@ cogl_buffer_impl_vk_destroy (CoglBufferImpl *impl,
         {
           if (vk_impl->device_local)
             vkUnmapMemory (device->device, vk_impl->staging_memory);
-          else
-            vkUnmapMemory (device->device, vk_impl->memory);
         }
       vk_impl->mapped = NULL;
+    }
+  if (vk_impl->host_map)
+    {
+      if (device)
+        vkUnmapMemory (device->device, vk_impl->memory);
+      vk_impl->host_map = NULL;
     }
 
   destroy_vk_buffer (device, &vk_impl->staging, &vk_impl->staging_memory);
   destroy_vk_buffer (device, &vk_impl->buffer, &vk_impl->memory);
   vk_impl->device_local = FALSE;
+  vk_impl->gpu_read = FALSE;
+  vk_impl->content_generation++;
   buffer->store_created = FALSE;
+}
+
+/* A queued read must retain the storage it recorded. Host-coherent writes
+ * become visible through the next queue submission, without a barrier-only
+ * submit or a fence wait at unmap. Protect old readers before the CPU writes. */
+static gboolean
+prepare_host_write (CoglBufferImplVk *impl,
+                    CoglBuffer       *buffer,
+                    GError          **error)
+{
+  CoglVkDevice *device = peek_device (buffer);
+  VkBuffer replacement = VK_NULL_HANDLE;
+  VkDeviceMemory memory = VK_NULL_HANDLE;
+  void *old_data = impl->host_map;
+  void *new_data = NULL;
+  gboolean temporary_old_map = FALSE;
+  VkResult res = VK_SUCCESS;
+
+  if (!impl->gpu_read)
+    return TRUE;
+
+  if (!alloc_vk_buffer (device, buffer->size,
+                        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
+                        VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
+                        VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT |
+                        VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                        VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                        VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                        &replacement, &memory, error))
+    return FALSE;
+
+  /* Preserve logical contents even if the caller's subsequent map fails. */
+  if (!old_data)
+    {
+      res = vkMapMemory (device->device, impl->memory, 0, buffer->size, 0, &old_data);
+      if (res != VK_SUCCESS)
+        goto failed;
+      temporary_old_map = TRUE;
+    }
+  res = vkMapMemory (device->device, memory, 0, buffer->size, 0, &new_data);
+  if (res != VK_SUCCESS)
+    goto failed;
+  memcpy (new_data, old_data, buffer->size);
+  vkUnmapMemory (device->device, impl->memory);
+  impl->host_map = NULL;
+
+  destroy_vk_buffer (device, &impl->buffer, &impl->memory);
+  impl->buffer = replacement;
+  impl->memory = memory;
+  impl->host_map = new_data;
+  impl->gpu_read = FALSE;
+  return TRUE;
+
+failed:
+  if (temporary_old_map)
+    vkUnmapMemory (device->device, impl->memory);
+  vkDestroyBuffer (device->device, replacement, NULL);
+  vkFreeMemory (device->device, memory, NULL);
+  cogl_vk_device_note_vk_result (device, res);
+  g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+               "Buffer write storage copy failed (%d)", (int) res);
+  return FALSE;
 }
 
 static void *
@@ -721,18 +638,31 @@ cogl_buffer_impl_vk_map_range (CoglBufferImpl     *impl,
 
   if (!vk_impl->device_local)
     {
-      res = vkMapMemory (device->device, vk_impl->memory, offset, size, 0, &ptr);
-      if (res != VK_SUCCESS)
+      if ((access & COGL_BUFFER_ACCESS_WRITE) &&
+          !prepare_host_write (vk_impl, buffer, error))
+        return NULL;
+      if (!vk_impl->host_map)
         {
-          g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
-                       "vkMapMemory failed (%d)", (int) res);
-          return NULL;
+          /* Physical mapping belongs to the storage. Logical Cogl maps
+           * still track their own access, offset and size independently. */
+          res = vkMapMemory (device->device, vk_impl->memory, 0,
+                             buffer->size, 0, &ptr);
+          if (res != VK_SUCCESS)
+            {
+              g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                           "vkMapMemory failed (%d)", (int) res);
+              return NULL;
+            }
+          vk_impl->host_map = ptr;
         }
+      ptr = (uint8_t *) vk_impl->host_map + offset;
 
       vk_impl->mapped = ptr;
       vk_impl->mapped_offset = offset;
       vk_impl->mapped_size = size;
       vk_impl->mapped_access = access;
+      if (access & COGL_BUFFER_ACCESS_WRITE)
+        vk_impl->content_generation++;
       buffer->flags |= COGL_BUFFER_FLAG_MAPPED;
       return ptr;
     }
@@ -764,6 +694,8 @@ cogl_buffer_impl_vk_map_range (CoglBufferImpl     *impl,
   vk_impl->mapped_offset = offset;
   vk_impl->mapped_size = size;
   vk_impl->mapped_access = access;
+  if (access & COGL_BUFFER_ACCESS_WRITE)
+    vk_impl->content_generation++;
   buffer->flags |= COGL_BUFFER_FLAG_MAPPED;
   return ptr;
 }
@@ -786,8 +718,6 @@ cogl_buffer_impl_vk_unmap (CoglBufferImpl *impl,
     {
       if (vk_impl->device_local)
         vkUnmapMemory (device->device, vk_impl->staging_memory);
-      else
-        vkUnmapMemory (device->device, vk_impl->memory);
     }
 
   vk_impl->mapped = NULL;
@@ -799,6 +729,8 @@ cogl_buffer_impl_vk_unmap (CoglBufferImpl *impl,
   if (!(access & COGL_BUFFER_ACCESS_WRITE) || !device)
     return;
 
+  vk_impl->content_generation++;
+
   if (vk_impl->device_local)
     {
       /* Staging → DEVICE_LOCAL; ignore errors to match GL unmap void API. */
@@ -808,15 +740,8 @@ cogl_buffer_impl_vk_unmap (CoglBufferImpl *impl,
         g_debug ("Cogl Vulkan: buffer staging upload failed: %s",
                  error->message);
     }
-  else
-    {
-      /* HOST_COHERENT still needs a dependency for GPU vertex/index reads
-       * after prior queue work (primitive 2nd VBO otherwise stays black).
-       */
-      if (!host_write_barrier (buffer, offset, size, &error))
-        g_debug ("Cogl Vulkan: host buffer barrier failed: %s",
-                 error->message);
-    }
+  /* Direct host-coherent writes are published by the consuming submission.
+   * Device-local staging still requires the transfer operation above. */
 }
 
 static gboolean
@@ -864,6 +789,7 @@ cogl_buffer_impl_vk_set_data (CoglBufferImpl  *impl,
     }
 
   memcpy (mapped, data, size);
+  vk_impl->content_generation++;
   vkUnmapMemory (device->device, vk_impl->staging_memory);
 
   return copy_buffers_oneshot (buffer,

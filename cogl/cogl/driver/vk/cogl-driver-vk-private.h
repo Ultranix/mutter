@@ -100,6 +100,19 @@ int cogl_driver_vk_get_latest_sync_fd (CoglDriverVk *driver);
  */
 void cogl_driver_vk_flush_current_pass (CoglDriverVk *driver);
 
+typedef enum
+{
+  COGL_VK_RETIRE_UNAVAILABLE,
+  COGL_VK_RETIRE_DEFERRED,
+  COGL_VK_RETIRE_COMPLETE,
+} CoglVkRetireResult;
+
+/* A recording pass or the newest pending submit owns deferred resources.
+ * COMPLETE proves that no recorded or submitted use remains; UNAVAILABLE
+ * requires the caller to submit recorded work and wait before destruction. */
+CoglVkRetireResult cogl_driver_vk_retire_list (CoglDriverVk      *driver,
+                                               CoglVkRetireList **retire);
+
 /* Overlay set_uniform pending values onto pack_uniforms name lookup. */
 const CoglBoxedValue *
 cogl_driver_vk_peek_pending_uniform (CoglDriverVk *driver,

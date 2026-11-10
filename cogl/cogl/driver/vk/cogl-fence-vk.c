@@ -20,6 +20,7 @@
 #include "config.h"
 
 #include "cogl/driver/vk/cogl-fence-vk-private.h"
+#include "cogl/driver/vk/cogl-image-vk-private.h"
 #include "cogl/driver/vk/cogl-vk-debug-private.h"
 
 #include <gio/gio.h>
@@ -62,8 +63,7 @@ free_deferred_cb (CoglVkFenceTicket *ticket)
 }
 
 /* Called only after completion. A skipped/failed export leaves the binary
- * signaled, so it must not be signaled again on the next submission.
- */
+ * signaled, so it must not be signaled again on the next submission. */
 static void
 reset_binary (CoglVkFenceTicket *ticket)
 {
@@ -88,6 +88,71 @@ free_transient_buffers (CoglVkFenceTicket *ticket)
       vkFreeMemory (ticket->device->device, buffer->memory, NULL);
     }
   g_clear_pointer (&ticket->transient_buffers, g_array_unref);
+}
+
+void
+cogl_vk_retire_list_add_image (CoglVkRetireList    *list,
+                               struct _CoglVkImage *image)
+{
+  if (!list->images)
+    list->images = g_ptr_array_new ();
+  g_ptr_array_add (list->images, image);
+}
+
+void
+cogl_vk_retire_list_add_handle (CoglVkRetireList  *list,
+                                CoglVkRetiredKind  kind,
+                                uint64_t           handle)
+{
+  CoglVkRetiredHandle retired = { .kind = kind, .handle = handle };
+
+  if (!list->handles)
+    list->handles = g_array_new (FALSE, FALSE, sizeof (CoglVkRetiredHandle));
+  g_array_append_val (list->handles, retired);
+}
+
+/* Only once the owning submit is observed complete, or at teardown after the
+ * device is idle: nothing submitted up to it still uses these objects. */
+void
+cogl_vk_retire_list_release (CoglVkRetireList *list,
+                             CoglVkDevice     *device)
+{
+  if (list->handles)
+    {
+      for (unsigned int i = 0; i < list->handles->len; i++)
+        {
+          CoglVkRetiredHandle *retired =
+            &g_array_index (list->handles, CoglVkRetiredHandle, i);
+
+          switch (retired->kind)
+            {
+            case COGL_VK_RETIRED_FRAMEBUFFER:
+              vkDestroyFramebuffer (device->device,
+                                    (VkFramebuffer) retired->handle, NULL);
+              break;
+            case COGL_VK_RETIRED_IMAGE_VIEW:
+              vkDestroyImageView (device->device,
+                                  (VkImageView) retired->handle, NULL);
+              break;
+            case COGL_VK_RETIRED_BUFFER:
+              vkDestroyBuffer (device->device,
+                               (VkBuffer) retired->handle, NULL);
+              break;
+            case COGL_VK_RETIRED_MEMORY:
+              vkFreeMemory (device->device,
+                            (VkDeviceMemory) retired->handle, NULL);
+              break;
+            }
+        }
+      g_clear_pointer (&list->handles, g_array_unref);
+    }
+
+  if (list->images)
+    {
+      for (unsigned int i = 0; i < list->images->len; i++)
+        cogl_vk_image_destroy_now (g_ptr_array_index (list->images, i));
+      g_clear_pointer (&list->images, g_ptr_array_unref);
+    }
 }
 
 /* Hand a submitted command buffer to the ticket so present can return without
@@ -158,6 +223,8 @@ cogl_vk_device_drain_fence_pool (CoglVkDevice *device)
 
   g_return_if_fail (device != NULL);
 
+  cogl_vk_device_reap_oneshots (device);
+
   if (!device->fence_inflight)
     return;
 
@@ -178,6 +245,7 @@ cogl_vk_device_drain_fence_pool (CoglVkDevice *device)
       /* Point is signaled: the CB is no longer executing, free it now. */
       free_deferred_cb (ticket);
       free_transient_buffers (ticket);
+      cogl_vk_retire_list_release (&ticket->retired, ticket->device);
       reset_binary (ticket);
       ticket->signaled_cached = FALSE;
       g_ptr_array_add (device->fence_free, ticket);
@@ -255,6 +323,7 @@ cogl_vk_fence_ticket_release (CoglVkFenceTicket *ticket)
       destroy_wait_semaphores (ticket);
       free_deferred_cb (ticket);
       free_transient_buffers (ticket);
+      cogl_vk_retire_list_release (&ticket->retired, ticket->device);
       reset_binary (ticket);
       ticket->signaled_cached = FALSE;
       g_ptr_array_add (ticket->device->fence_free, ticket);
@@ -311,8 +380,7 @@ cogl_vk_fence_ticket_ensure_binary (CoglVkFenceTicket *ticket,
 
   /* Offscreen software devices may have no external semaphore handles.
    * Keep a real binary semaphore and the same completion/recycle ordering;
-   * only the export capability is optional.
-   */
+   * only the export capability is optional. */
   if (!ticket->device->has_external_semaphore_fd)
     create_info.pNext = NULL;
 
@@ -399,6 +467,7 @@ cogl_vk_fence_ticket_free (CoglVkFenceTicket *ticket)
    */
   free_deferred_cb (ticket);
   free_transient_buffers (ticket);
+  cogl_vk_retire_list_release (&ticket->retired, ticket->device);
 
   if (ticket->device)
     {

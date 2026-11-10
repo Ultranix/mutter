@@ -194,6 +194,49 @@ dnd_subsurface_get_geometry_scale (MetaWaylandActorSurface *actor_surface)
   return 1;
 }
 
+static gboolean
+collect_drag_surface (GNode   *node,
+                      gpointer user_data)
+{
+  MetaWaylandSurface *surface = node->data;
+  ClutterActor *actor = CLUTTER_ACTOR (meta_wayland_surface_get_actor (surface));
+  GPtrArray *actors = user_data;
+
+  if (actor)
+    g_ptr_array_add (actors, actor);
+  return FALSE;
+}
+
+static void
+dnd_surface_notify_subsurface_state_changed (MetaWaylandSurfaceRole *role)
+{
+  MetaWaylandSurface *surface = meta_wayland_surface_role_get_surface (role);
+  ClutterActor *actor = CLUTTER_ACTOR (meta_wayland_surface_get_actor (surface));
+  ClutterActor *container = actor ? clutter_actor_get_parent (actor) : NULL;
+  g_autoptr (GPtrArray) actors = g_ptr_array_new ();
+  g_autoptr (GList) children = NULL;
+
+  /* The icon may be committed before the drag has created its feedback actor.
+   * sync_actor_state rebuilds it once the actor has been attached. */
+  if (!container)
+    return;
+  g_node_traverse (surface->applied_state.subsurface_branch_node,
+                   G_IN_ORDER, G_TRAVERSE_LEAVES, -1,
+                   collect_drag_surface, actors);
+  children = clutter_actor_get_children (container);
+  for (GList *l = children; l; l = l->next)
+    if (META_IS_SURFACE_ACTOR (l->data) && !g_ptr_array_find (actors, l->data, NULL))
+      clutter_actor_remove_child (container, l->data);
+  for (guint i = 0; i < actors->len; i++)
+    {
+      ClutterActor *child = g_ptr_array_index (actors, i);
+      if (clutter_actor_get_parent (child) == container)
+        clutter_actor_set_child_at_index (container, child, i);
+      else
+        clutter_actor_insert_child_at_index (container, child, i);
+    }
+}
+
 static void
 dnd_subsurface_sync_actor_state (MetaWaylandActorSurface *actor_surface)
 {
@@ -225,6 +268,7 @@ dnd_subsurface_sync_actor_state (MetaWaylandActorSurface *actor_surface)
   meta_feedback_actor_set_anchor (feedback_actor, anchor_x, anchor_y);
 
   actor_surface_class->sync_actor_state (actor_surface);
+  dnd_surface_notify_subsurface_state_changed (surface_role);
 }
 
 static void
@@ -246,6 +290,8 @@ meta_wayland_surface_role_dnd_class_init (MetaWaylandSurfaceRoleDNDClass *klass)
 
   surface_role_class->assigned = dnd_surface_assigned;
   surface_role_class->apply_state = dnd_surface_apply_state;
+  surface_role_class->notify_subsurface_state_changed =
+    dnd_surface_notify_subsurface_state_changed;
   surface_role_class->get_preferred_scale_monitor =
     dnd_surface_get_preferred_scale_monitor;
 

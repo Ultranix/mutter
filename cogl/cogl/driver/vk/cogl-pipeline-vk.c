@@ -882,7 +882,7 @@ cogl_vk_create_tex_pipeline (CoglVkPipelineCache       *cache,
   dynamic.dynamicStateCount = n_dyn;
   dynamic.pDynamicStates = dyn_states;
 
-  res = vkCreateGraphicsPipelines (dev, VK_NULL_HANDLE, 1, &pinfo,
+  res = vkCreateGraphicsPipelines (dev, cache->device->pipeline_cache, 1, &pinfo,
                                    NULL, out_pipe);
   if (res != VK_SUCCESS)
     {
@@ -2628,8 +2628,9 @@ cogl_vk_pass_begin_render (CoglVkPass              *pass,
       vkCmdSetViewport (pass->command_buffer, 0, 1, &viewport);
       pass->viewport = viewport;
       pass->viewport_valid = TRUE;
-      if (pass->scissor_valid)
-        vkCmdSetScissor (pass->command_buffer, 0, 1, &pass->scissor);
+      /* Dynamic state outlives draws: a removed clip must reset to full. */
+      vkCmdSetScissor (pass->command_buffer, 0, 1,
+                       pass->scissor_valid ? &pass->scissor : &scissor);
       if (setup->ds_format != VK_FORMAT_UNDEFINED)
         cogl_vk_pass_apply_stencil_dynamic (pass, 0);
       return TRUE;
@@ -2918,8 +2919,7 @@ cogl_vk_cmd_draw_texture (CoglVkPass              *pass,
   gboolean apply_blend_constants = FALSE;
 
   /* Cold pipe uses pipe_layout_cold (sampler[N]+UBO). Alias to hot tex_pipe
-   * keeps the hot single-binding layout.
-   */
+   * keeps the hot single-binding layout. */
   use_cold = (pipe_override != VK_NULL_HANDLE &&
               cogl_pipeline != NULL &&
               pipe_override != setup->tex_pipe &&
@@ -2932,11 +2932,15 @@ cogl_vk_cmd_draw_texture (CoglVkPass              *pass,
                                              &src, error))
     return FALSE;
 
-  /* Acquire texture images before beginning the render pass. Generated
-   * multi-layer shaders require transitions for every sampled layer.
-   */
-  cogl_vk_pass_end_render (pass);
-  cogl_vk_pipeline_barrier_layer_textures (pass, cogl_pipeline, src, use_cold);
+  /* Acquire foreign textures and transition sampled layers before
+   * beginning the render pass. */
+  if (cogl_vk_pipeline_layer_textures_need_barrier (pass, cogl_pipeline, src,
+                                                    use_cold))
+    {
+      cogl_vk_pass_end_render (pass);
+      cogl_vk_pipeline_barrier_layer_textures (pass, cogl_pipeline, src,
+                                               use_cold);
+    }
 
   if (!cogl_vk_pass_begin_render (pass, cache, dst, setup,
                                   dst->width, dst->height, error))
@@ -3506,7 +3510,9 @@ std140_type_info (const char *glsl_type,
                   size_t     *out_align,
                   size_t     *out_size)
 {
-  if (strcmp (glsl_type, "float") == 0 || strcmp (glsl_type, "int") == 0)
+  if (strcmp (glsl_type, "float") == 0 ||
+      strcmp (glsl_type, "int") == 0 ||
+      strcmp (glsl_type, "bool") == 0)
     {
       *out_align = 4;
       *out_size = 4;
@@ -3975,6 +3981,33 @@ write_boxed_to_ubo (uint8_t               *base,
     }
 }
 
+#define LAYER_CONSTANT_PREFIX "cogl_layer_const"
+
+static void
+add_layer_constant_members (CoglPipeline *pipeline,
+                            GArray       *members,
+                            size_t       *offset_inout)
+{
+  g_autofree CoglPipelineLayer **layers = NULL;
+  int n_layers = 0;
+
+  cogl_vk_pipeline_collect_layers (pipeline, &layers, &n_layers);
+  for (int i = 0; i < n_layers; i++)
+    {
+      CoglVkUboMember m = { 0 };
+
+      if (!layers[i])
+        continue;
+      *offset_inout = std140_align_up (*offset_inout, 16);
+      m.name = g_strdup_printf (LAYER_CONSTANT_PREFIX "%d", layers[i]->index);
+      m.glsl_type = g_strdup ("vec4");
+      m.offset = *offset_inout;
+      m.size = 16;
+      g_array_append_val (members, m);
+      *offset_inout += 16;
+    }
+}
+
 gboolean
 cogl_vk_pipeline_pack_uniforms (CoglVkPipelineCache  *cache,
                                 CoglPipeline         *pipeline,
@@ -4002,6 +4035,7 @@ cogl_vk_pipeline_pack_uniforms (CoglVkPipelineCache  *cache,
 
   members = g_array_new (FALSE, TRUE, sizeof (CoglVkUboMember));
   g_array_set_clear_func (members, ubo_member_clear);
+  add_layer_constant_members (pipeline, members, &offset);
 
   if (decls_inout)
     {
@@ -4095,6 +4129,17 @@ cogl_vk_pipeline_pack_uniforms (CoglVkPipelineCache  *cache,
         {
           CoglVkUboMember *m = &g_array_index (members, CoglVkUboMember, i);
           int u;
+
+          if (g_str_has_prefix (m->name, LAYER_CONSTANT_PREFIX))
+            {
+              float constant[4];
+
+              _cogl_pipeline_get_layer_combine_constant (
+                pipeline, atoi (m->name + strlen (LAYER_CONSTANT_PREFIX)),
+                constant);
+              memcpy (base + m->offset, constant, sizeof (constant));
+              continue;
+            }
 
           /* Whole-array upload first so a later name[i] is not wiped. */
           for (u = 0; u < n_names; u++)
@@ -4704,8 +4749,7 @@ fail_upload:
  * views require immutable samplers instead. Normalize only this compatibility
  * path on the GPU, keeping floating point values for subsequent snippets.
  * External producers may change the image without changing its Cogl object,
- * so reuse allocation but refresh pixels on every draw.
- */
+ * so reuse allocation but refresh pixels on every draw. */
 static gboolean
 prepare_cold_image (CoglVkPass          *pass,
                     CoglVkPipelineCache *cache,
@@ -4784,6 +4828,46 @@ cogl_vk_pipeline_prepare_cold_images (CoglVkPass          *pass,
   return TRUE;
 }
 
+static gboolean
+layer_image_needs_barrier (CoglVkPass  *pass,
+                           CoglVkImage *image)
+{
+  if (image->is_dmabuf)
+    return !cogl_vk_pass_has_foreign_image (pass, image);
+  return image->layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ||
+         !image->shader_read_synced;
+}
+
+gboolean
+cogl_vk_pipeline_layer_textures_need_barrier (CoglVkPass   *pass,
+                                              CoglPipeline *pipeline,
+                                              CoglVkImage  *src_layer0,
+                                              gboolean      use_cold)
+{
+  g_autofree CoglPipelineLayer **layers = NULL;
+  int want = 0;
+
+  if (layer_image_needs_barrier (pass, src_layer0))
+    return TRUE;
+  if (!pipeline)
+    return FALSE;
+
+  cogl_vk_pipeline_collect_layers (pipeline, &layers, &want);
+  for (int li = 0; li < want; li++)
+    {
+      CoglTexture *tex = layers[li]
+        ? _cogl_pipeline_layer_get_texture (layers[li]) : NULL;
+      CoglTexture2DVk *tex_vk = cogl_texture_2d_vk_resolve (tex);
+      CoglVkImage *img = tex_vk ? cogl_texture_2d_vk_peek_image (tex_vk) : NULL;
+
+      if (use_cold && img && img->is_ycbcr)
+        img = img->cold_rgba;
+      if (img && img != src_layer0 && layer_image_needs_barrier (pass, img))
+        return TRUE;
+    }
+  return FALSE;
+}
+
 void
 cogl_vk_pipeline_barrier_layer_textures (CoglVkPass   *pass,
                                          CoglPipeline *pipeline,
@@ -4799,10 +4883,8 @@ cogl_vk_pipeline_barrier_layer_textures (CoglVkPass   *pass,
 
   if (src_layer0->is_dmabuf)
     {
-      /* Acquire once per pass; re-acquiring would use oldLayout=GENERAL while
-       * still
-       * SHADER_READ_ONLY.
-       */
+      /* Acquire once per pass; re-acquiring would use oldLayout=GENERAL while still
+       * SHADER_READ_ONLY. */
       if (!cogl_vk_pass_has_foreign_image (pass, src_layer0))
         {
           VkImageLayout old = src_layer0->layout;
@@ -4857,6 +4939,7 @@ cogl_vk_pipeline_barrier_layer_textures (CoglVkPass   *pass,
                                      VK_ACCESS_MEMORY_WRITE_BIT,
                                      VK_ACCESS_SHADER_READ_BIT);
         }
+      src_layer0->shader_read_synced = TRUE;
       cogl_vk_debug_barrier ("layer0", src_layer0, old,
                              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                              host_src);
@@ -4924,6 +5007,7 @@ cogl_vk_pipeline_barrier_layer_textures (CoglVkPass   *pass,
                 VK_ACCESS_HOST_WRITE_BIT,
                 VK_ACCESS_SHADER_READ_BIT);
             }
+          img->shader_read_synced = TRUE;
           cogl_vk_debug_barrier ("layerN", img, old,
                                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                                  host_src);

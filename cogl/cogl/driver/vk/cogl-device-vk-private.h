@@ -29,6 +29,7 @@
 #include "cogl/cogl-driver.h"
 
 #include <glib.h>
+#include <stdio.h>
 #include <vulkan/vulkan.h>
 
 G_BEGIN_DECLS
@@ -37,7 +38,38 @@ typedef struct _CoglVkDevice CoglVkDevice;
 typedef struct _CoglVkFenceTicket CoglVkFenceTicket;
 typedef struct _CoglDriverVk CoglDriverVk;
 
+typedef enum
+{
+  COGL_VK_RETIRED_FRAMEBUFFER,
+  COGL_VK_RETIRED_IMAGE_VIEW,
+  COGL_VK_RETIRED_BUFFER,
+  COGL_VK_RETIRED_MEMORY,
+} CoglVkRetiredKind;
+
+typedef struct
+{
+  CoglVkRetiredKind kind;
+  uint64_t handle; /* VkFramebuffer / VkImageView / VkBuffer / VkDeviceMemory */
+} CoglVkRetiredHandle;
+
+/* Objects freed while a submit may still use them (cogl-fence-vk-private.h). */
+typedef struct
+{
+  GPtrArray *images; /* CoglVkImage *, owned */
+  GArray *handles; /* CoglVkRetiredHandle */
+} CoglVkRetireList;
+
 #define COGL_VK_TIMESTAMP_QUERY_COUNT 64
+#define COGL_VK_GPU_TRACE_ENTRIES 24
+
+typedef struct
+{
+  int begin;
+  int end;
+  int64_t submit_us;
+  VkSemaphore timeline;
+  uint64_t point;
+} CoglVkGpuTraceEntry;
 
 /* Function signature usable with headers lacking VK_EXT_device_fault. */
 typedef VkResult (VKAPI_PTR *CoglVkGetDeviceFaultInfoEXT) (VkDevice device,
@@ -70,6 +102,12 @@ struct _CoglVkDevice
    * SIGSEGV in vkCmdEndRenderPass (meson MALLOC_PERTURB).
    */
   VkCommandPool oneshot_command_pool;
+  /* Oneshot submits (image initialization clears) not yet observed complete,
+   * in submission order; reaped by cogl_vk_device_reap_oneshots. */
+  GPtrArray *oneshot_pending; /* CoglVkOneshotPending * */
+  /* Counts queue submits that complete asynchronously (passes, oneshots), so
+   * the newest one can be found: its completion covers all earlier work. */
+  uint64_t submit_serial;
 
   /* VBO pipelines and vertex snapshots belong to this VkDevice. */
   GHashTable *vbo_pipes;
@@ -77,10 +115,11 @@ struct _CoglVkDevice
   VkDeviceMemory vbo_dummy_mem;
   VkBuffer vbo_float_shadow_buf;
   VkDeviceMemory vbo_float_shadow_mem;
+  void *vbo_float_shadow_map;
   size_t vbo_float_shadow_cap;
   size_t vbo_float_shadow_used;
-  GPtrArray *vbo_float_shadow_retired_buf;
-  GPtrArray *vbo_float_shadow_retired_mem;
+  GHashTable *vbo_snapshots;
+  size_t vbo_snapshot_source_bytes;
 
   gboolean has_dma_buf;
   gboolean has_drm_modifiers;
@@ -96,6 +135,18 @@ struct _CoglVkDevice
    * command buffer, skipping per-draw vkAllocateDescriptorSets/Update.
    */
   gboolean has_push_descriptor;
+  gboolean has_global_priority;
+  VkPipelineCache pipeline_cache;
+  gboolean has_calibrated_timestamps;
+
+  /* COGL_VK_GPU_TRACE=<path>: per-pass submit/GPU begin/GPU end, in us. */
+  FILE *gpu_trace;
+  PFN_vkGetCalibratedTimestampsEXT vkGetCalibratedTimestampsEXT;
+  uint64_t gpu_trace_cal_ticks;
+  uint64_t gpu_trace_cal_mono_ns;
+  unsigned int gpu_trace_head;
+  unsigned int gpu_trace_tail;
+  CoglVkGpuTraceEntry gpu_trace_entries[COGL_VK_GPU_TRACE_ENTRIES];
 
   /* Nanoseconds per timestamp tick (VkPhysicalDeviceLimits::timestampPeriod).
    */
@@ -136,8 +187,29 @@ CoglVkDevice * cogl_vk_device_new (int      drm_fd,
 
 void cogl_vk_device_free (CoglVkDevice *device);
 
+typedef struct
+{
+  VkFence fence;
+  VkCommandBuffer command_buffer;
+  VkCommandPool pool;
+  uint64_t submit_serial;
+  CoglVkRetireList retired;
+} CoglVkOneshotPending;
+
 /* Drain inflight tickets whose timeline has signaled into fence_free. */
 void cogl_vk_device_drain_fence_pool (CoglVkDevice *device);
+
+/* Hand a submitted oneshot command buffer and its fence to the device; both
+ * are freed once the fence is observed signaled. Queue order alone makes the
+ * work visible to later submits, so the submitter need not wait. Objects the
+ * oneshot uses go on the returned entry's retire list. */
+CoglVkOneshotPending * cogl_vk_device_defer_oneshot (CoglVkDevice    *device,
+                                                     VkFence          fence,
+                                                     VkCommandBuffer  command_buffer,
+                                                     VkCommandPool    pool);
+
+/* Free completed oneshots; returns TRUE if any are still executing. */
+gboolean cogl_vk_device_reap_oneshots (CoglVkDevice *device);
 
 /* Record DEVICE_LOST (and optional device_fault note) for reset-status. */
 void cogl_vk_device_note_vk_result (CoglVkDevice *device,
@@ -152,6 +224,12 @@ int cogl_vk_device_cmd_write_timestamp (CoglVkDevice           *device,
                                         VkPipelineStageFlagBits stage);
 
 /* Non-blocking read; FALSE if unavailable / unsupported. No CPU fence wait. */
+void cogl_vk_device_gpu_trace_note_submit (CoglVkDevice *dev,
+                                           int           begin,
+                                           int           end,
+                                           VkSemaphore   timeline,
+                                           uint64_t      point);
+
 gboolean cogl_vk_device_get_timestamp_ns (CoglVkDevice  *device,
                                           uint32_t       query_index,
                                           uint64_t      *out_ns);

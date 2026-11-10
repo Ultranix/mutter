@@ -429,6 +429,13 @@ gboolean cogl_vk_pipeline_prepare_cold_ds (CoglVkPipelineCache  *cache,
 gboolean cogl_vk_pipeline_ensure_dummy_white (CoglVkPipelineCache  *cache,
                                               GError              **error);
 
+/* FALSE when every layer image is already readable by this pass's shaders,
+ * so the draw can stay inside the open render pass. */
+gboolean cogl_vk_pipeline_layer_textures_need_barrier (CoglVkPass   *pass,
+                                                       CoglPipeline *pipeline,
+                                                       CoglVkImage  *src_layer0,
+                                                       gboolean      use_cold);
+
 /* Transition every pipeline layer image to SHADER_READ_ONLY (pre-RP). */
 void cogl_vk_pipeline_barrier_layer_textures (CoglVkPass   *pass,
                                               CoglPipeline *pipeline,

@@ -145,26 +145,19 @@ cogl_vk_vbo_device_clear (CoglVkDevice *dev)
     vkFreeMemory (dev->device, dev->vbo_dummy_mem, NULL);
   if (dev->vbo_float_shadow_buf)
     vkDestroyBuffer (dev->device, dev->vbo_float_shadow_buf, NULL);
+  if (dev->vbo_float_shadow_map)
+    vkUnmapMemory (dev->device, dev->vbo_float_shadow_mem);
   if (dev->vbo_float_shadow_mem)
     vkFreeMemory (dev->device, dev->vbo_float_shadow_mem, NULL);
-  if (dev->vbo_float_shadow_retired_buf)
-    {
-      for (unsigned int i = 0; i < dev->vbo_float_shadow_retired_buf->len; i++)
-        {
-          vkDestroyBuffer (dev->device, (VkBuffer) (uintptr_t)
-                           g_ptr_array_index (dev->vbo_float_shadow_retired_buf, i), NULL);
-          vkFreeMemory (dev->device, (VkDeviceMemory) (uintptr_t)
-                        g_ptr_array_index (dev->vbo_float_shadow_retired_mem, i), NULL);
-        }
-    }
-  g_clear_pointer (&dev->vbo_float_shadow_retired_buf, g_ptr_array_unref);
-  g_clear_pointer (&dev->vbo_float_shadow_retired_mem, g_ptr_array_unref);
   dev->vbo_dummy_buf = VK_NULL_HANDLE;
   dev->vbo_dummy_mem = VK_NULL_HANDLE;
   dev->vbo_float_shadow_buf = VK_NULL_HANDLE;
   dev->vbo_float_shadow_mem = VK_NULL_HANDLE;
+  dev->vbo_float_shadow_map = NULL;
   dev->vbo_float_shadow_cap = 0;
   dev->vbo_float_shadow_used = 0;
+  g_clear_pointer (&dev->vbo_snapshots, g_hash_table_unref);
+  dev->vbo_snapshot_source_bytes = 0;
 }
 
 static unsigned int
@@ -365,6 +358,56 @@ read_attr_component_as_float (CoglAttribute *a,
 }
 
 static gboolean
+retire_float_shadow (CoglVkDevice *dev,
+                     GError      **error)
+{
+  CoglVkRetireList *retire;
+  CoglVkRetireResult result;
+
+  if (dev->vbo_float_shadow_buf == VK_NULL_HANDLE)
+    return TRUE;
+
+  result = cogl_driver_vk_retire_list (dev->owner, &retire);
+  if (result == COGL_VK_RETIRE_DEFERRED)
+    {
+      cogl_vk_retire_list_add_handle (retire, COGL_VK_RETIRED_BUFFER,
+                                      (uint64_t) dev->vbo_float_shadow_buf);
+      cogl_vk_retire_list_add_handle (retire, COGL_VK_RETIRED_MEMORY,
+                                      (uint64_t) dev->vbo_float_shadow_mem);
+      /* Unmapping does not invalidate GPU reads of the retired memory. */
+      vkUnmapMemory (dev->device, dev->vbo_float_shadow_mem);
+    }
+  else
+    {
+      if (result == COGL_VK_RETIRE_UNAVAILABLE)
+        {
+          VkResult res;
+
+          /* Never flush or destroy a pass borrowed by draw_common. Failure
+           * preserves its existing chunk rather than accumulating storage. */
+          if (!dev->owner || dev->owner->current_pass)
+            {
+              g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                                   "Cannot establish vertex snapshot retirement");
+              return FALSE;
+            }
+          res = vkQueueWaitIdle (dev->graphics_queue);
+          cogl_vk_device_note_vk_result (dev, res);
+          if (res != VK_SUCCESS && res != VK_ERROR_DEVICE_LOST)
+            {
+              g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                           "Vertex snapshot retirement failed (%d)", (int) res);
+              return FALSE;
+            }
+        }
+      vkUnmapMemory (dev->device, dev->vbo_float_shadow_mem);
+      vkDestroyBuffer (dev->device, dev->vbo_float_shadow_buf, NULL);
+      vkFreeMemory (dev->device, dev->vbo_float_shadow_mem, NULL);
+    }
+  return TRUE;
+}
+
+static gboolean
 ensure_float_shadow_capacity (CoglVkDevice *dev,
                               size_t        need,
                               GError      **error)
@@ -376,67 +419,24 @@ ensure_float_shadow_capacity (CoglVkDevice *dev,
   VkMemoryRequirements reqs;
   VkMemoryAllocateInfo ai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
   VkPhysicalDeviceMemoryProperties mp;
+  VkBuffer buffer = VK_NULL_HANDLE;
+  VkDeviceMemory memory = VK_NULL_HANDLE;
+  void *mapped = NULL;
   uint32_t i;
   VkResult res;
 
   if (need <= dev->vbo_float_shadow_cap && dev->vbo_float_shadow_buf != VK_NULL_HANDLE)
     return TRUE;
 
-  /* Do not flush_current_pass here. draw_common still holds that pass;
-   * freeing it mid-resolve is a use-after-free (uniforms exit 245).
-   * Keep the old buffer until nothing is recording, then WaitIdle.
-   */
-  if (dev->owner && !dev->owner->current_pass &&
-      dev->vbo_float_shadow_retired_buf &&
-      dev->vbo_float_shadow_retired_buf->len > 0)
-    {
-      unsigned int ri;
-
-      vkDeviceWaitIdle (dev->device);
-      for (ri = 0; ri < dev->vbo_float_shadow_retired_buf->len; ri++)
-        {
-          vkDestroyBuffer (dev->device,
-                           (VkBuffer) (uintptr_t)
-                           g_ptr_array_index (dev->vbo_float_shadow_retired_buf, ri),
-                           NULL);
-          vkFreeMemory (dev->device,
-                        (VkDeviceMemory) (uintptr_t)
-                        g_ptr_array_index (dev->vbo_float_shadow_retired_mem, ri),
-                        NULL);
-        }
-      g_ptr_array_set_size (dev->vbo_float_shadow_retired_buf, 0);
-      g_ptr_array_set_size (dev->vbo_float_shadow_retired_mem, 0);
-    }
-
-  if (dev->vbo_float_shadow_buf != VK_NULL_HANDLE)
-    {
-      if (!dev->vbo_float_shadow_retired_buf)
-        {
-          dev->vbo_float_shadow_retired_buf = g_ptr_array_new ();
-          dev->vbo_float_shadow_retired_mem = g_ptr_array_new ();
-        }
-      g_ptr_array_add (dev->vbo_float_shadow_retired_buf,
-                       (gpointer) (uintptr_t) dev->vbo_float_shadow_buf);
-      g_ptr_array_add (dev->vbo_float_shadow_retired_mem,
-                       (gpointer) (uintptr_t) dev->vbo_float_shadow_mem);
-      dev->vbo_float_shadow_buf = VK_NULL_HANDLE;
-      dev->vbo_float_shadow_mem = VK_NULL_HANDLE;
-      dev->vbo_float_shadow_cap = 0;
-      dev->vbo_float_shadow_used = 0;
-    }
-
-  /* Journal snapshots are one buffer per draw. 4K forces a grow (and
-   * used to free the live pass) after a handful of quads.
-   */
-  bi.size = MAX (need, (size_t) (1024 * 1024));
-  res = vkCreateBuffer (dev->device, &bi, NULL, &dev->vbo_float_shadow_buf);
+  /* Start a new chunk for this draw's snapshots. Earlier ranges remain
+   * immutable until their owning submit completes. Preflight reserves all
+   * attributes together, so rollover cannot split a draw across chunks. */
+  bi.size = MAX (need - dev->vbo_float_shadow_used, (size_t) (1024 * 1024));
+  res = vkCreateBuffer (dev->device, &bi, NULL, &buffer);
   if (res != VK_SUCCESS)
-    {
-      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
-                   "float shadow VkBuffer failed (%d)", (int) res);
-      return FALSE;
-    }
-  vkGetBufferMemoryRequirements (dev->device, dev->vbo_float_shadow_buf, &reqs);
+    goto failed;
+
+  vkGetBufferMemoryRequirements (dev->device, buffer, &reqs);
   vkGetPhysicalDeviceMemoryProperties (dev->physical_device, &mp);
   ai.allocationSize = reqs.size;
   for (i = 0; i < mp.memoryTypeCount; i++)
@@ -452,27 +452,88 @@ ensure_float_shadow_capacity (CoglVkDevice *dev,
           break;
         }
     }
-  res = vkAllocateMemory (dev->device, &ai, NULL, &dev->vbo_float_shadow_mem);
-  if (res != VK_SUCCESS)
+  if (i == mp.memoryTypeCount)
     {
-      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
-                   "float shadow memory failed (%d)", (int) res);
-      vkDestroyBuffer (dev->device, dev->vbo_float_shadow_buf, NULL);
-      dev->vbo_float_shadow_buf = VK_NULL_HANDLE;
+      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                           "No host-visible coherent memory for vertex snapshots");
+      vkDestroyBuffer (dev->device, buffer, NULL);
       return FALSE;
     }
-  vkBindBufferMemory (dev->device, dev->vbo_float_shadow_buf,
-                      dev->vbo_float_shadow_mem, 0);
+
+  res = vkAllocateMemory (dev->device, &ai, NULL, &memory);
+  if (res != VK_SUCCESS)
+    goto failed;
+  res = vkBindBufferMemory (dev->device, buffer, memory, 0);
+  if (res != VK_SUCCESS)
+    goto failed;
+  res = vkMapMemory (dev->device, memory, 0, bi.size, 0, &mapped);
+  if (res != VK_SUCCESS)
+    goto failed;
+
+  /* Coherent storage stays mapped for the chunk's CPU lifetime. Each draw
+   * appends immutable ranges; queue submission makes host writes visible.
+   * Publish only after successful allocation, binding and mapping. Failure
+   * leaves the old chunk and its recorded ranges intact. */
+  if (!retire_float_shadow (dev, error))
+    goto failed;
+  if (dev->vbo_snapshots)
+    g_hash_table_remove_all (dev->vbo_snapshots);
+  dev->vbo_snapshot_source_bytes = 0;
+  dev->vbo_float_shadow_buf = buffer;
+  dev->vbo_float_shadow_mem = memory;
+  dev->vbo_float_shadow_map = mapped;
   dev->vbo_float_shadow_cap = (size_t) bi.size;
+  dev->vbo_float_shadow_used = 0;
   return TRUE;
+
+failed:
+  cogl_vk_device_note_vk_result (dev, res);
+  if (mapped)
+    vkUnmapMemory (dev->device, memory);
+  if (buffer != VK_NULL_HANDLE)
+    vkDestroyBuffer (dev->device, buffer, NULL);
+  if (memory != VK_NULL_HANDLE)
+    vkFreeMemory (dev->device, memory, NULL);
+  if (!error || !*error)
+    g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                 "Vertex snapshot storage allocation failed (%d)", (int) res);
+  return FALSE;
 }
 
 static size_t
 attr_vertex_count (CoglAttribute *a);
 
+/* Checked per attribute per draw; g_getenv scans the whole environment. */
+static gboolean
+ab_no_float_expand (void)
+{
+  static int cached = -1;
+
+  if (cached < 0)
+    cached = g_getenv ("COGL_VK_AB_NO_FLOAT_EXPAND") != NULL;
+  return cached;
+}
+
+static const float *
+unorm8_to_float_table (void)
+{
+  static float table[256];
+  static gboolean ready;
+
+  if (!ready)
+    {
+      for (int i = 0; i < 256; i++)
+        table[i] = (float) i / 255.f;
+      ready = TRUE;
+    }
+  return table;
+}
+
 static gboolean
 expand_attr_to_float_shadow (CoglAttribute *a,
                              CoglVkDevice  *dev,
+                             size_t         first,
+                             size_t         vertex_count,
                              VkBuffer      *out_buf,
                              VkDeviceSize  *out_off,
                              GError       **error)
@@ -481,7 +542,6 @@ expand_attr_to_float_shadow (CoglAttribute *a,
   CoglBuffer *buf;
   const uint8_t *data;
   float *dst;
-  void *mapped;
   size_t n_verts;
   size_t nbytes;
   size_t align_off;
@@ -499,7 +559,7 @@ expand_attr_to_float_shadow (CoglAttribute *a,
       return FALSE;
     }
 
-  n_verts = attr_vertex_count (a);
+  n_verts = vertex_count ? vertex_count : attr_vertex_count (a);
   if (n_verts < 1)
     {
       g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED,
@@ -512,43 +572,52 @@ expand_attr_to_float_shadow (CoglAttribute *a,
       (a->name_state->name_id == COGL_ATTRIBUTE_NAME_ID_POSITION_ARRAY ||
        a->name_state->name_id == COGL_ATTRIBUTE_NAME_ID_TEXTURE_COORD_ARRAY))
     w_pad = 1.f;
-  nbytes = n_verts * (size_t) out_comps * sizeof (float);
+  nbytes = (first + n_verts) * (size_t) out_comps * sizeof (float);
   align_off = (dev->vbo_float_shadow_used + 15u) & ~((size_t) 15u);
 
   if (!ensure_float_shadow_capacity (dev, align_off + nbytes, error))
     return FALSE;
+  align_off = (dev->vbo_float_shadow_used + 15u) & ~((size_t) 15u);
 
   data = _cogl_buffer_map (buf, COGL_BUFFER_ACCESS_READ, 0, error);
   if (!data)
     return FALSE;
 
-  if (vkMapMemory (dev->device, dev->vbo_float_shadow_mem, 0,
-                   dev->vbo_float_shadow_cap, 0, &mapped) != VK_SUCCESS)
-    {
-      cogl_buffer_unmap (buf);
-      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED,
-                           "float shadow map failed");
-      return FALSE;
-    }
-
-  dst = (float *) ((uint8_t *) mapped + align_off);
+  dst = (float *) ((uint8_t *) dev->vbo_float_shadow_map + align_off);
   comp_size = (int) attr_type_size (a->type);
-  for (v = 0; v < n_verts; v++)
+  /* Journal colors: every quad's vertices pass through here. */
+  if (a->type == COGL_ATTRIBUTE_TYPE_UNSIGNED_BYTE && a->normalized &&
+      a->n_components == 4)
     {
-      const uint8_t *row = data + a->offset + v * a->stride;
-      float *out = dst + v * (size_t) out_comps;
+      const float *unorm8 = unorm8_to_float_table ();
 
-      for (c = 0; c < a->n_components; c++)
-        out[c] = read_attr_component_as_float (a, row + c * comp_size);
-      for (; c < out_comps; c++)
-        out[c] = (c == 3) ? w_pad : 0.f;
+      for (v = first; v < first + n_verts; v++)
+        {
+          const uint8_t *row = data + a->offset + v * a->stride;
+          float *out = dst + v * 4;
+
+          out[0] = unorm8[row[0]];
+          out[1] = unorm8[row[1]];
+          out[2] = unorm8[row[2]];
+          out[3] = unorm8[row[3]];
+        }
     }
+  else
+    for (v = first; v < first + n_verts; v++)
+      {
+        const uint8_t *row = data + a->offset + v * a->stride;
+        float *out = dst + v * (size_t) out_comps;
+
+        for (c = 0; c < a->n_components; c++)
+          out[c] = read_attr_component_as_float (a, row + c * comp_size);
+        for (; c < out_comps; c++)
+          out[c] = (c == 3) ? w_pad : 0.f;
+      }
 
   {
-    float v0x = n_verts ? dst[0] : 0.f;
-    float v0y = (n_verts && a->n_components > 1) ? dst[1] : 0.f;
+    float v0x = n_verts ? dst[first * out_comps] : 0.f;
+    float v0y = (n_verts && a->n_components > 1) ? dst[first * out_comps + 1] : 0.f;
 
-    vkUnmapMemory (dev->device, dev->vbo_float_shadow_mem);
     cogl_buffer_unmap (buf);
 
     *out_buf = dev->vbo_float_shadow_buf;
@@ -1610,15 +1679,7 @@ get_vbo_pipeline (CoglVkPipelineCache     *cache,
   extras.vertex_input = &vi;
   extras.dynamic_blend_constants = TRUE;
   if (setup->ds_format != VK_FORMAT_UNDEFINED)
-    {
-      /* A/B: stencil_equal_keep ON/OFF did not change custom-attributes 245
-       * (WaitIdle still died). Keep OFF; clip paths set this explicitly.
-       */
-      extras.stencil_equal_keep = FALSE;
-      cogl_vk_debug_log ("vbo",
-                         "  stencil_equal_keep OFF (ds_fmt=%d)",
-                         (int) setup->ds_format);
-    }
+    extras.stencil_equal_keep = TRUE;
 
   cogl_vk_debug_log (
     "vbo",
@@ -1685,16 +1746,18 @@ attr_vertex_count (CoglAttribute *a)
 }
 
 static size_t
-shadow_bytes_for_attr (CoglAttribute *a)
+shadow_bytes_for_attr (CoglAttribute *a,
+                       size_t         first,
+                       size_t         count)
 {
   size_t n_verts;
   int out_comps;
 
-  n_verts = attr_vertex_count (a);
+  n_verts = count ? count : attr_vertex_count (a);
   if (n_verts < 1)
     return 0;
   out_comps = a->n_components == 3 ? 4 : a->n_components;
-  return n_verts * (size_t) out_comps * sizeof (float);
+  return (first + n_verts) * (size_t) out_comps * sizeof (float);
 }
 
 /* Journal rewrites the same CoglBuffer before vkQueueSubmit. A draw that
@@ -1703,18 +1766,25 @@ shadow_bytes_for_attr (CoglAttribute *a)
  * shadow ring; keep stride/format so the VI does not change.
  */
 static size_t
-raw_snapshot_bytes (CoglAttribute *a)
+raw_snapshot_bytes (CoglAttribute *a,
+                    size_t         first,
+                    size_t         count)
 {
   CoglBuffer *buf;
 
   if (!a || attr_needs_float_expand (a))
     return 0;
-  if (g_getenv ("COGL_VK_AB_NO_FLOAT_EXPAND"))
+  if (ab_no_float_expand ())
     return 0;
   buf = COGL_BUFFER (cogl_attribute_get_buffer (a));
   if (!buf || buf->size < 1)
     return 0;
-  return buf->size;
+  size_t n = count ? count : attr_vertex_count (a);
+  size_t element = (size_t) a->n_components * attr_type_size (a->type);
+
+  if (a->stride == 0)
+    return element;
+  return n ? (first + n - 1) * a->stride + element : 0;
 }
 
 /* Grow once before the resolve loop. Growing mid-loop destroys the VkBuffer
@@ -1724,6 +1794,8 @@ static gboolean
 preflight_float_shadow (CoglAttribute **attributes,
                         int             n_attributes,
                         CoglVkDevice   *dev,
+                        size_t          first,
+                        size_t          count,
                         GError        **error)
 {
   size_t used = dev->vbo_float_shadow_used;
@@ -1735,17 +1807,30 @@ preflight_float_shadow (CoglAttribute **attributes,
 
       if (!a)
         continue;
-      if (g_getenv ("COGL_VK_AB_NO_FLOAT_EXPAND"))
+      if (ab_no_float_expand ())
         continue;
+      size_t available = attr_vertex_count (a);
+      size_t element = (size_t) a->n_components * attr_type_size (a->type);
+      CoglBuffer *source = COGL_BUFFER (cogl_attribute_get_buffer (a));
+      gboolean constant = a->stride == 0 && !attr_needs_float_expand (a) &&
+                          source && a->offset < source->size && element <= source->size - a->offset;
+
+      if (!constant && (available == 0 || first > available ||
+                        (count && count > available - first)))
+        {
+          g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                               "Vertex draw range exceeds the attribute buffer");
+          return FALSE;
+        }
       if (attr_needs_float_expand (a))
         {
           used = (used + 15u) & ~((size_t) 15u);
-          used += shadow_bytes_for_attr (a);
+          used += shadow_bytes_for_attr (a, first, count);
         }
-      else if (raw_snapshot_bytes (a) > 0)
+      else if (raw_snapshot_bytes (a, first, count) > 0)
         {
           used = (used + 15u) & ~((size_t) 15u);
-          used += raw_snapshot_bytes (a);
+          used += raw_snapshot_bytes (a, first, count);
         }
     }
   return ensure_float_shadow_capacity (dev, used, error);
@@ -1757,13 +1842,14 @@ preflight_float_shadow (CoglAttribute **attributes,
 static gboolean
 snapshot_raw_attr_to_shadow (CoglAttribute *a,
                              CoglVkDevice  *dev,
+                             size_t         first,
+                             size_t         count,
                              VkBuffer      *out_buf,
                              VkDeviceSize  *out_off,
                              GError       **error)
 {
   CoglBuffer *buf;
   const uint8_t *data;
-  void *mapped;
   size_t nbytes;
   size_t align_off;
 
@@ -1775,32 +1861,109 @@ snapshot_raw_attr_to_shadow (CoglAttribute *a,
       return FALSE;
     }
 
-  nbytes = buf->size;
+  nbytes = raw_snapshot_bytes (a, first, count);
   align_off = (dev->vbo_float_shadow_used + 15u) & ~((size_t) 15u);
   if (!ensure_float_shadow_capacity (dev, align_off + nbytes, error))
     return FALSE;
+  align_off = (dev->vbo_float_shadow_used + 15u) & ~((size_t) 15u);
 
   data = _cogl_buffer_map (buf, COGL_BUFFER_ACCESS_READ, 0, error);
   if (!data)
     return FALSE;
 
-  if (vkMapMemory (dev->device, dev->vbo_float_shadow_mem, 0,
-                   dev->vbo_float_shadow_cap, 0, &mapped) != VK_SUCCESS)
-    {
-      cogl_buffer_unmap (buf);
-      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED,
-                           "raw snapshot map failed");
-      return FALSE;
-    }
-
-  memcpy ((uint8_t *) mapped + align_off, data, nbytes);
-  vkUnmapMemory (dev->device, dev->vbo_float_shadow_mem);
+  size_t prefix = first * a->stride;
+  memcpy ((uint8_t *) dev->vbo_float_shadow_map + align_off + prefix,
+          data + a->offset + prefix, nbytes - prefix);
   cogl_buffer_unmap (buf);
 
   *out_buf = dev->vbo_float_shadow_buf;
-  *out_off = (VkDeviceSize) (align_off + (size_t) a->offset);
+  *out_off = (VkDeviceSize) align_off;
   dev->vbo_float_shadow_used = align_off + nbytes;
   return TRUE;
+}
+
+typedef struct
+{
+  CoglBuffer *buffer;
+  uint64_t generation;
+  size_t offset;
+  size_t stride;
+  size_t first;
+  size_t count;
+  int components;
+  int type;
+  int name_id;
+  gboolean normalized;
+} SnapshotKey;
+
+typedef struct
+{
+  SnapshotKey key;
+  GWeakRef source;
+  size_t source_bytes;
+  VkDeviceSize offset;
+} SnapshotEntry;
+
+static unsigned int
+snapshot_hash (gconstpointer data)
+{
+  const SnapshotKey *key = data;
+
+  return g_direct_hash (key->buffer) ^ (unsigned int) key->generation ^
+         (unsigned int) key->offset ^ ((unsigned int) key->first * 33u) ^
+         ((unsigned int) key->count * 65599u) ^ (unsigned int) key->type;
+}
+
+static gboolean
+snapshot_equal (gconstpointer a,
+                gconstpointer b)
+{
+  const SnapshotKey *x = a, *y = b;
+
+  return x->buffer == y->buffer && x->generation == y->generation &&
+         x->offset == y->offset && x->stride == y->stride &&
+         x->first == y->first && x->count == y->count &&
+         x->components == y->components && x->type == y->type &&
+         x->name_id == y->name_id && x->normalized == y->normalized;
+}
+
+static void
+snapshot_entry_free (gpointer data)
+{
+  SnapshotEntry *entry = data;
+
+  g_weak_ref_clear (&entry->source);
+  g_free (entry);
+}
+
+static void
+cache_snapshot (CoglVkDevice       *dev,
+                const SnapshotKey  *key,
+                VkDeviceSize        offset)
+{
+  const size_t source_limit = 8 * 1024 * 1024;
+  SnapshotEntry *entry;
+
+  if (key->buffer->size > source_limit)
+    return;
+  if (!dev->vbo_snapshots)
+    dev->vbo_snapshots = g_hash_table_new_full (snapshot_hash, snapshot_equal,
+                                                NULL, snapshot_entry_free);
+  if (g_hash_table_size (dev->vbo_snapshots) >= 128 ||
+      dev->vbo_snapshot_source_bytes > source_limit - key->buffer->size)
+    {
+      g_hash_table_remove_all (dev->vbo_snapshots);
+      dev->vbo_snapshot_source_bytes = 0;
+    }
+  entry = g_new (SnapshotEntry, 1);
+  entry->key = *key;
+  /* Buffers borrow their CoglContext. Keeping them alive until renderer
+   * teardown would release them after that context has lost its display. */
+  g_weak_ref_init (&entry->source, key->buffer);
+  entry->source_bytes = key->buffer->size;
+  entry->offset = offset;
+  dev->vbo_snapshot_source_bytes += key->buffer->size;
+  g_hash_table_insert (dev->vbo_snapshots, &entry->key, entry);
 }
 
 static gboolean
@@ -1808,6 +1971,8 @@ resolve_attrs (CoglAttribute      **attributes,
                int                  n_attributes,
                CoglVkDevice        *dev,
                const CoglVkVboMask *mask,
+               size_t               first,
+               size_t               count,
                VkBuffer            *out_bufs,
                VkDeviceSize        *out_offs,
                GError             **error)
@@ -1819,13 +1984,11 @@ resolve_attrs (CoglAttribute      **attributes,
   if (!ensure_dummy (dev, error))
     return FALSE;
 
-  if (!preflight_float_shadow (attributes, n_attributes, dev, error))
+  if (!preflight_float_shadow (attributes, n_attributes, dev, first, count, error))
     return FALSE;
 
-  /* Do not reset dev->vbo_float_shadow_used here — an open pass CB may still
-   * reference earlier shadow ranges. Append until capacity forces realloc
-   * (WaitIdle + free in ensure_float_shadow_capacity).
-   */
+  /* Append within the current chunk. Rollover retires the whole chunk;
+   * resetting a live range would overwrite earlier recorded draws. */
 
   for (i = 0; i < mask->n_bindings; i++)
     {
@@ -1841,6 +2004,8 @@ resolve_attrs (CoglAttribute      **attributes,
       CoglAttribute *a = attributes[i];
       CoglBuffer *buf;
       VkBuffer vkbuf;
+      SnapshotKey key = {0};
+      gboolean cacheable;
       int loc = -1;
       int layer;
 
@@ -1880,8 +2045,45 @@ resolve_attrs (CoglAttribute      **attributes,
         }
       if (loc < 0 || loc >= mask->n_bindings)
         continue;
+      buf = COGL_BUFFER (cogl_attribute_get_buffer (a));
+      /* Malloc-backed or externally mapped sources have no tracked write
+       * generation. Never reuse snapshots of those sources. */
+      cacheable = buf && !buf->use_malloc &&
+                  !(buf->flags & COGL_BUFFER_FLAG_MAPPED) &&
+                  COGL_IS_BUFFER_IMPL_VK (buf->impl) &&
+                  !ab_no_float_expand ();
+      if (cacheable)
+        {
+          SnapshotEntry *entry;
+
+          key = (SnapshotKey) {
+            .buffer = buf,
+            .generation = cogl_buffer_impl_vk_get_content_generation (
+              COGL_BUFFER_IMPL_VK (buf->impl)),
+            .offset = a->offset, .stride = a->stride,
+            .first = first, .count = count,
+            .components = a->n_components, .type = a->type,
+            .name_id = a->name_state->name_id, .normalized = a->normalized,
+          };
+          entry = dev->vbo_snapshots ? g_hash_table_lookup (dev->vbo_snapshots, &key) : NULL;
+          if (entry)
+            {
+              CoglBuffer *source = g_weak_ref_get (&entry->source);
+              gboolean valid = source == buf;
+
+              g_clear_object (&source);
+              if (valid)
+                {
+                  out_bufs[loc] = dev->vbo_float_shadow_buf;
+                  out_offs[loc] = entry->offset;
+                  continue;
+                }
+              dev->vbo_snapshot_source_bytes -= entry->source_bytes;
+              g_hash_table_remove (dev->vbo_snapshots, &key);
+            }
+        }
       /* A/B gate: COGL_VK_AB_NO_FLOAT_EXPAND skips CPU expand. */
-      if (!g_getenv ("COGL_VK_AB_NO_FLOAT_EXPAND") &&
+      if (!ab_no_float_expand () &&
           attr_needs_float_expand (a))
         {
           cogl_vk_debug_log (
@@ -1890,10 +2092,12 @@ resolve_attrs (CoglAttribute      **attributes,
             loc,
             a->name_state->name ? a->name_state->name : "?",
             (int) a->type, a->normalized);
-          if (!expand_attr_to_float_shadow (a, dev, &vkbuf, &out_offs[loc],
+          if (!expand_attr_to_float_shadow (a, dev, first, count, &vkbuf, &out_offs[loc],
                                             error))
             return FALSE;
           out_bufs[loc] = vkbuf;
+          if (cacheable)
+            cache_snapshot (dev, &key, out_offs[loc]);
           continue;
         }
       cogl_vk_debug_log (
@@ -1906,17 +2110,18 @@ resolve_attrs (CoglAttribute      **attributes,
       if (!ensure_buf (buf, error))
         return FALSE;
       /* Journal recycles this CoglBuffer before submit. Bind a copy.
-       * AB skips the copy and keeps the live buffer (old black-pixel bug).
-       */
-      if (g_getenv ("COGL_VK_AB_NO_FLOAT_EXPAND"))
+       * AB skips the copy and keeps the live buffer (old black-pixel bug). */
+      if (ab_no_float_expand ())
         {
           vkbuf = peek_buf (buf);
           out_offs[loc] = (VkDeviceSize) a->offset;
         }
-      else if (!snapshot_raw_attr_to_shadow (a, dev, &vkbuf, &out_offs[loc],
+      else if (!snapshot_raw_attr_to_shadow (a, dev, first, count, &vkbuf, &out_offs[loc],
                                              error))
         return FALSE;
       out_bufs[loc] = vkbuf;
+      if (cacheable)
+        cache_snapshot (dev, &key, out_offs[loc]);
     }
 
   if (!have_pos)
@@ -2120,8 +2325,7 @@ fail:
 }
 
 /* Check in index units before multiplying by the element size. This also
- * covers direct u16/u32 draws, which never map the buffer on the CPU.
- */
+ * covers direct u16/u32 draws, which never map the buffer on the CPU. */
 static gboolean
 validate_index_range (size_t    buffer_size,
                       size_t    index_size,
@@ -2286,6 +2490,85 @@ color_store_order (CoglVkImage *dst)
   return 0.f;
 }
 
+typedef struct
+{
+  uint64_t generation;
+  int first;
+  int count;
+  CoglIndicesType type;
+  uint32_t minimum;
+  uint32_t maximum;
+} IndexRange;
+
+static gboolean
+indexed_vertex_range (CoglIndices *indices,
+                      int          first,
+                      int          count,
+                      size_t      *vertex_first,
+                      size_t      *vertex_count,
+                      GError     **error)
+{
+  static const char cache_key[] = "cogl-vk-index-range";
+  CoglBuffer *buffer = COGL_BUFFER (cogl_indices_get_buffer (indices));
+  CoglIndicesType type = cogl_indices_get_indices_type (indices);
+  size_t size = cogl_indices_type_get_size (type);
+  gboolean mapped = buffer->flags & COGL_BUFFER_FLAG_MAPPED;
+  gboolean cacheable = !buffer->use_malloc && !mapped &&
+                       COGL_IS_BUFFER_IMPL_VK (buffer->impl);
+  uint64_t generation = cacheable ? cogl_buffer_impl_vk_get_content_generation (
+    COGL_BUFFER_IMPL_VK (buffer->impl)) : 0;
+  IndexRange *cached = g_object_get_data (G_OBJECT (buffer), cache_key);
+  IndexRange range = {
+    .generation = generation, .first = first, .count = count,
+    .type = type, .minimum = UINT32_MAX,
+  };
+  const uint8_t *data;
+
+  if (cacheable && cached && cached->generation == generation &&
+      cached->first == first && cached->count == count && cached->type == type)
+    range = *cached;
+  else
+    {
+      /* Index stores are host-visible. Framebuffer conversion may already
+       * have mapped them before borrowing the current recording pass. */
+      data = mapped ? buffer->data :
+             _cogl_buffer_map (buffer, COGL_BUFFER_ACCESS_READ, 0, error);
+      if (!data)
+        return FALSE;
+      for (int i = 0; i < count; i++)
+        {
+          uint32_t value = 0;
+          const uint8_t *element = data + ((size_t) first + i) * size;
+
+          if (type == COGL_INDICES_TYPE_UNSIGNED_BYTE)
+            value = *element;
+          else if (type == COGL_INDICES_TYPE_UNSIGNED_SHORT)
+            {
+              uint16_t short_value;
+
+              memcpy (&short_value, element, sizeof (short_value));
+              value = short_value;
+            }
+          else
+            memcpy (&value, element, sizeof (value));
+          range.minimum = MIN (range.minimum, value);
+          range.maximum = MAX (range.maximum, value);
+        }
+      if (!mapped)
+        cogl_buffer_unmap (buffer);
+      if (cacheable)
+        {
+          IndexRange *copy = g_new (IndexRange, 1);
+
+          *copy = range;
+          g_object_set_data_full (G_OBJECT (buffer), cache_key, copy, g_free);
+        }
+    }
+  *vertex_first = range.minimum;
+  *vertex_count = (size_t) range.maximum - range.minimum + 1;
+  return TRUE;
+}
+
 static gboolean
 draw_common (CoglVkPass              *pass,
              CoglVkPipelineCache     *cache,
@@ -2325,6 +2608,27 @@ draw_common (CoglVkPass              *pass,
   gboolean cold_override;
   VkPrimitiveTopology topology = topology_from_mode (mode);
   gboolean line_loop = (mode == COGL_VERTICES_MODE_LINE_LOOP);
+  size_t vertex_first = first;
+  size_t vertex_count = count;
+
+  if (first < 0 || count < 0 || (indexed && !indices))
+    {
+      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                           "Invalid VBO draw range or missing indices");
+      return FALSE;
+    }
+  if (count == 0 || (line_loop && count < 2))
+    return TRUE;
+  if (indexed &&
+      !validate_index_range (cogl_buffer_get_size (
+                               COGL_BUFFER (cogl_indices_get_buffer (indices))),
+                             cogl_indices_type_get_size (
+                               cogl_indices_get_indices_type (indices)),
+                             first, count, error))
+    return FALSE;
+  if (indexed && !indexed_vertex_range (indices, first, count,
+                                        &vertex_first, &vertex_count, error))
+    return FALSE;
 
   if (first < 0 || count < 0 || (indexed && !indices))
     {
@@ -2355,6 +2659,7 @@ draw_common (CoglVkPass              *pass,
   vbufs = g_new0 (VkBuffer, mask.n_bindings);
   voffs = g_new0 (VkDeviceSize, mask.n_bindings);
   if (!resolve_attrs (attributes, n_attributes, cache->device, &mask,
+                      vertex_first, vertex_count,
                       vbufs, voffs, error))
     return FALSE;
 
@@ -2385,7 +2690,8 @@ draw_common (CoglVkPass              *pass,
       !cogl_vk_pipeline_prepare_cold_images (pass, cache, pipeline, &src, error))
     return FALSE;
 
-  if (textured || use_cold)
+  if ((textured || use_cold) &&
+      cogl_vk_pipeline_layer_textures_need_barrier (pass, pipeline, src, use_cold))
     {
       cogl_vk_pass_end_render (pass);
       cogl_vk_pipeline_barrier_layer_textures (pass, pipeline, src, use_cold);

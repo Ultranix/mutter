@@ -27,6 +27,7 @@
 #include "cogl/cogl-debug.h"
 
 #include <gio/gio.h>
+#include <glib/gstdio.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
@@ -320,6 +321,21 @@ collect_device_extensions (VkPhysicalDevice   phys,
       dev->has_device_fault = TRUE;
     }
 
+  /* EGL contexts ask for HIGH too; without this a busy client delays us. */
+  if (extension_in_list (VK_EXT_GLOBAL_PRIORITY_EXTENSION_NAME, props, count))
+    {
+      g_ptr_array_add (names, (gpointer) VK_EXT_GLOBAL_PRIORITY_EXTENSION_NAME);
+      dev->has_global_priority = TRUE;
+    }
+
+  if (g_getenv ("COGL_VK_GPU_TRACE") &&
+      extension_in_list (VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME, props, count))
+    {
+      g_ptr_array_add (names,
+                       (gpointer) VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME);
+      dev->has_calibrated_timestamps = TRUE;
+    }
+
   /* Push the hot texture sampler into the CB, avoiding per-draw DS alloc. */
   if (extension_in_list (VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME, props, count))
     {
@@ -348,6 +364,66 @@ collect_device_extensions (VkPhysicalDevice   phys,
   return TRUE;
 }
 
+static void gpu_trace_init (CoglVkDevice *dev);
+
+static char *
+pipeline_cache_path (void)
+{
+  return g_build_filename (g_get_user_cache_dir (), "mutter",
+                           "vk-pipeline-cache", NULL);
+}
+
+/* Lets the first animation after login reuse driver compiles. The driver
+ * validates the blob header and ignores data from another GPU or version. */
+static void
+pipeline_cache_load (CoglVkDevice *dev)
+{
+  g_autofree char *path = pipeline_cache_path ();
+  g_autofree char *data = NULL;
+  gsize size = 0;
+  VkPipelineCacheCreateInfo info = {
+    .sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO,
+  };
+
+  if (g_file_get_contents (path, &data, &size, NULL))
+    {
+      info.initialDataSize = size;
+      info.pInitialData = data;
+    }
+  if (vkCreatePipelineCache (dev->device, &info, NULL,
+                             &dev->pipeline_cache) == VK_SUCCESS)
+    return;
+
+  info.initialDataSize = 0;
+  info.pInitialData = NULL;
+  if (vkCreatePipelineCache (dev->device, &info, NULL,
+                             &dev->pipeline_cache) != VK_SUCCESS)
+    dev->pipeline_cache = VK_NULL_HANDLE;
+}
+
+static void
+pipeline_cache_save (CoglVkDevice *dev)
+{
+  g_autofree char *path = pipeline_cache_path ();
+  g_autofree char *dir = g_path_get_dirname (path);
+  g_autofree char *data = NULL;
+  size_t size = 0;
+
+  if (dev->pipeline_cache == VK_NULL_HANDLE)
+    return;
+  if (vkGetPipelineCacheData (dev->device, dev->pipeline_cache, &size,
+                              NULL) == VK_SUCCESS && size > 0)
+    {
+      data = g_malloc (size);
+      if (vkGetPipelineCacheData (dev->device, dev->pipeline_cache, &size,
+                                  data) == VK_SUCCESS &&
+          g_mkdir_with_parents (dir, 0700) == 0)
+        g_file_set_contents (path, data, size, NULL);
+    }
+  vkDestroyPipelineCache (dev->device, dev->pipeline_cache, NULL);
+  dev->pipeline_cache = VK_NULL_HANDLE;
+}
+
 CoglVkDevice *
 cogl_vk_device_new (int      drm_fd,
                     GError **error)
@@ -369,6 +445,10 @@ cogl_vk_device_new (int      drm_fd,
   VkInstanceCreateInfo inst_info;
   float queue_prio = 1.0f;
   VkDeviceQueueCreateInfo queue_info;
+  VkDeviceQueueGlobalPriorityCreateInfoEXT queue_priority = {
+    .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO_EXT,
+    .globalPriority = VK_QUEUE_GLOBAL_PRIORITY_HIGH_EXT,
+  };
   VkPhysicalDeviceTimelineSemaphoreFeatures timeline_feat = {
     .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES,
     .timelineSemaphore = VK_TRUE,
@@ -481,6 +561,8 @@ cogl_vk_device_new (int      drm_fd,
   queue_info.queueFamilyIndex = dev->graphics_queue_family;
   queue_info.queueCount = 1;
   queue_info.pQueuePriorities = &queue_prio;
+  if (dev->has_global_priority)
+    queue_info.pNext = &queue_priority;
 
   /* Core features: start from a zeroed enable mask (pEnabledFeatures was
    * previously NULL → all off). Query support, then enable only what shaders
@@ -530,6 +612,14 @@ cogl_vk_device_new (int      drm_fd,
   device_info.pNext = feat_chain;
 
   res = vkCreateDevice (dev->physical_device, &device_info, NULL, &dev->device);
+  /* HIGH needs CAP_SYS_NICE on i915; EGL also falls back silently. */
+  if (dev->has_global_priority &&
+      (res == VK_ERROR_NOT_PERMITTED_EXT || res == VK_ERROR_INITIALIZATION_FAILED))
+    {
+      queue_info.pNext = NULL;
+      dev->has_global_priority = FALSE;
+      res = vkCreateDevice (dev->physical_device, &device_info, NULL, &dev->device);
+    }
   /* Names owned by g_autofree; steal so cleanup does not double-free. */
   g_free (g_steal_pointer (&dev_ext_names));
   if (res != VK_SUCCESS)
@@ -654,6 +744,8 @@ cogl_vk_device_new (int      drm_fd,
       if (!dev->vkGetDeviceFaultInfoEXT)
         dev->has_device_fault = FALSE;
     }
+  gpu_trace_init (dev);
+  pipeline_cache_load (dev);
   dev->vkGetPhysicalDeviceImageFormatProperties2 =
     (PFN_vkGetPhysicalDeviceImageFormatProperties2)
     vkGetInstanceProcAddr (dev->instance,
@@ -676,7 +768,7 @@ cogl_vk_device_new (int      drm_fd,
 
   COGL_NOTE (WINSYS,
              "Cogl Vulkan device ready (queue family %u, dmabuf=%d modifiers=%d "
-             "timeline=%d foreign=%d ycbcr=%d timestamp=%d fault=%d)",
+             "timeline=%d foreign=%d ycbcr=%d timestamp=%d fault=%d high-priority=%d)",
              dev->graphics_queue_family,
              dev->has_dma_buf,
              dev->has_drm_modifiers,
@@ -684,10 +776,14 @@ cogl_vk_device_new (int      drm_fd,
              dev->has_queue_family_foreign,
              dev->has_sampler_ycbcr,
              dev->has_timestamp_query,
-             dev->has_device_fault);
+             dev->has_device_fault,
+             dev->has_global_priority);
 
   return dev;
 }
+
+static gboolean reap_oneshots (CoglVkDevice *device,
+                               gboolean      force);
 
 void
 cogl_vk_device_free (CoglVkDevice *device)
@@ -701,12 +797,22 @@ cogl_vk_device_free (CoglVkDevice *device)
    * destroyed with no submit still referencing them. Teardown only.
    */
   if (device->device != VK_NULL_HANDLE)
-    vkDeviceWaitIdle (device->device);
+    {
+      VkResult res = vkDeviceWaitIdle (device->device);
+
+      cogl_vk_device_note_vk_result (device, res);
+      if (res != VK_SUCCESS && res != VK_ERROR_DEVICE_LOST)
+        g_error ("Cogl Vulkan: device teardown wait failed (%d)", (int) res);
+    }
 
   cogl_vk_vbo_device_clear (device);
+  reap_oneshots (device, TRUE);
+  g_clear_pointer (&device->oneshot_pending, g_ptr_array_unref);
   g_clear_pointer (&device->fence_inflight, g_ptr_array_unref);
   g_clear_pointer (&device->fence_free, g_ptr_array_unref);
 
+  g_clear_pointer (&device->gpu_trace, fclose);
+  pipeline_cache_save (device);
   if (device->timestamp_pool != VK_NULL_HANDLE)
     vkDestroyQueryPool (device->device, device->timestamp_pool, NULL);
   if (device->oneshot_command_pool != VK_NULL_HANDLE)
@@ -718,6 +824,70 @@ cogl_vk_device_free (CoglVkDevice *device)
   if (device->instance != VK_NULL_HANDLE)
     vkDestroyInstance (device->instance, NULL);
   g_free (device);
+}
+
+CoglVkOneshotPending *
+cogl_vk_device_defer_oneshot (CoglVkDevice    *device,
+                              VkFence          fence,
+                              VkCommandBuffer  command_buffer,
+                              VkCommandPool    pool)
+{
+  CoglVkOneshotPending *pending = g_new0 (CoglVkOneshotPending, 1);
+
+  pending->fence = fence;
+  pending->command_buffer = command_buffer;
+  pending->pool = pool;
+  pending->submit_serial = ++device->submit_serial;
+
+  if (!device->oneshot_pending)
+    device->oneshot_pending = g_ptr_array_new ();
+  g_ptr_array_add (device->oneshot_pending, pending);
+  return pending;
+}
+
+static gboolean
+reap_oneshots (CoglVkDevice *device,
+               gboolean      force)
+{
+  unsigned int i = 0;
+
+  if (!device->oneshot_pending)
+    return FALSE;
+
+  while (i < device->oneshot_pending->len)
+    {
+      CoglVkOneshotPending *pending =
+        g_ptr_array_index (device->oneshot_pending, i);
+
+      if (!force)
+        {
+          VkResult res = vkGetFenceStatus (device->device, pending->fence);
+
+          if (res != VK_SUCCESS)
+            {
+              /* A failed query is not proof that the submit completed. */
+              cogl_vk_device_note_vk_result (device, res);
+              i++;
+              continue;
+            }
+        }
+
+      vkDestroyFence (device->device, pending->fence, NULL);
+      vkFreeCommandBuffers (device->device, pending->pool, 1,
+                            &pending->command_buffer);
+      cogl_vk_retire_list_release (&pending->retired, device);
+      g_free (pending);
+      /* Keep submission order: the newest entry is the last one. */
+      g_ptr_array_remove_index (device->oneshot_pending, i);
+    }
+
+  return device->oneshot_pending->len > 0;
+}
+
+gboolean
+cogl_vk_device_reap_oneshots (CoglVkDevice *device)
+{
+  return reap_oneshots (device, FALSE);
 }
 
 void
@@ -800,6 +970,111 @@ cogl_vk_device_cmd_write_timestamp (CoglVkDevice           *device,
   vkCmdResetQueryPool (cmd, device->timestamp_pool, index, 1);
   vkCmdWriteTimestamp (cmd, stage, device->timestamp_pool, index);
   return (int) index;
+}
+
+static void
+gpu_trace_calibrate (CoglVkDevice *dev)
+{
+  VkCalibratedTimestampInfoEXT info[2] = {
+    { .sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_EXT,
+      .timeDomain = VK_TIME_DOMAIN_DEVICE_EXT },
+    { .sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_EXT,
+      .timeDomain = VK_TIME_DOMAIN_CLOCK_MONOTONIC_EXT },
+  };
+  uint64_t stamps[2];
+  uint64_t deviation;
+
+  if (dev->vkGetCalibratedTimestampsEXT (dev->device, 2, info, stamps,
+                                         &deviation) != VK_SUCCESS)
+    return;
+  dev->gpu_trace_cal_ticks = stamps[0];
+  dev->gpu_trace_cal_mono_ns = stamps[1];
+}
+
+static void
+gpu_trace_init (CoglVkDevice *dev)
+{
+  const char *path = g_getenv ("COGL_VK_GPU_TRACE");
+
+  if (!path || !dev->has_calibrated_timestamps || !dev->has_timestamp_query)
+    return;
+  dev->vkGetCalibratedTimestampsEXT =
+    (PFN_vkGetCalibratedTimestampsEXT)
+    vkGetDeviceProcAddr (dev->device, "vkGetCalibratedTimestampsEXT");
+  if (dev->vkGetCalibratedTimestampsEXT)
+    dev->gpu_trace = fopen (path, "w");
+  if (dev->gpu_trace)
+    gpu_trace_calibrate (dev);
+}
+
+static gboolean
+gpu_trace_read_tick (CoglVkDevice *dev,
+                     int           query,
+                     uint64_t     *ticks)
+{
+  return vkGetQueryPoolResults (dev->device, dev->timestamp_pool, query, 1,
+                                sizeof (*ticks), ticks, sizeof (*ticks),
+                                VK_QUERY_RESULT_64_BIT) == VK_SUCCESS;
+}
+
+static int64_t
+gpu_trace_mono_us (CoglVkDevice *dev,
+                   uint64_t      ticks)
+{
+  double delta = (double) ((int64_t) (ticks - dev->gpu_trace_cal_ticks)) *
+                 dev->timestamp_period;
+
+  return (int64_t) ((dev->gpu_trace_cal_mono_ns + delta) / 1000.0);
+}
+
+/* Queue delay is begin - submit; execution is end - begin. Queries stay valid
+ * for COGL_VK_TIMESTAMP_QUERY_COUNT / 2 passes, the ring below is smaller. */
+void
+cogl_vk_device_gpu_trace_note_submit (CoglVkDevice *dev,
+                                      int           begin,
+                                      int           end,
+                                      VkSemaphore   timeline,
+                                      uint64_t      point)
+{
+  CoglVkGpuTraceEntry *entry;
+
+  if (!dev->gpu_trace || begin < 0 || end < 0 || timeline == VK_NULL_HANDLE)
+    return;
+
+  while (dev->gpu_trace_tail != dev->gpu_trace_head)
+    {
+      CoglVkGpuTraceEntry *oldest = &dev->gpu_trace_entries[
+        dev->gpu_trace_tail % COGL_VK_GPU_TRACE_ENTRIES];
+      uint64_t begin_ticks, end_ticks, completed = 0;
+
+      /* A reused slot keeps its previous value until the reset executes. */
+      if (dev->vkGetSemaphoreCounterValue (dev->device, oldest->timeline,
+                                           &completed) != VK_SUCCESS ||
+          completed < oldest->point)
+        break;
+      if (!gpu_trace_read_tick (dev, oldest->begin, &begin_ticks) ||
+          !gpu_trace_read_tick (dev, oldest->end, &end_ticks))
+        break;
+      fprintf (dev->gpu_trace,
+               "%" G_GINT64_FORMAT " %" G_GINT64_FORMAT " %" G_GINT64_FORMAT "\n",
+               oldest->submit_us, gpu_trace_mono_us (dev, begin_ticks),
+               gpu_trace_mono_us (dev, end_ticks));
+      dev->gpu_trace_tail++;
+    }
+  fflush (dev->gpu_trace);
+
+  if (dev->gpu_trace_head - dev->gpu_trace_tail == COGL_VK_GPU_TRACE_ENTRIES)
+    dev->gpu_trace_tail++;
+  entry = &dev->gpu_trace_entries[dev->gpu_trace_head++ %
+                                  COGL_VK_GPU_TRACE_ENTRIES];
+  entry->begin = begin;
+  entry->end = end;
+  entry->timeline = timeline;
+  entry->point = point;
+  entry->submit_us = g_get_monotonic_time ();
+
+  if (dev->gpu_trace_head % 256 == 0)
+    gpu_trace_calibrate (dev);
 }
 
 gboolean

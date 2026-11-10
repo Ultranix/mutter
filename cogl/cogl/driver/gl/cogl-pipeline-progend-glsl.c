@@ -391,8 +391,8 @@ typedef struct
 
 static gboolean
 get_uniform_cb (CoglPipeline *pipeline,
-                int layer_index,
-                void *user_data)
+                int           layer_index,
+                void         *user_data)
 {
   UpdateUniformsState *state = user_data;
   CoglPipelineProgramState *program_state = state->program_state;
@@ -432,7 +432,7 @@ get_uniform_cb (CoglPipeline *pipeline,
 
   g_string_set_size (source_buffer, 0);
   g_string_append_printf (source_buffer,
-                          "cogl_texture_matrix[%i]", layer_index);
+                          "cogl_texture_matrix[%i]", state->unit);
 
   GE_RET (uniform_location,
           driver, glGetUniformLocation (state->gl_program,

@@ -41,8 +41,7 @@ G_BEGIN_DECLS
 #define COGL_VK_VBO_LOC_POINT_SIZE    3
 #define COGL_VK_VBO_LOC_NORMAL        4
 /* Locations 0..4 retain the hot shader ABI. Additional texcoords and
- * custom attributes are packed consecutively from location 5 per draw.
- */
+ * custom attributes are packed consecutively from location 5 per draw. */
 #define COGL_VK_VBO_LOC_TEXCOORD_BASE 5
 
 gboolean cogl_vk_vbo_should_use_push_constant_fast_path (CoglVerticesMode  mode,

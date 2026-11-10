@@ -183,14 +183,16 @@ meta_dnd_actor_drag_finish (MetaDnDActor *self,
                             gboolean      success)
 {
   ClutterActor *actor, *child;
+  ClutterActorIter iter;
 
   g_return_if_fail (META_IS_DND_ACTOR (self));
   g_return_if_fail (META_IS_SURFACE_ACTOR (clutter_actor_get_first_child (CLUTTER_ACTOR (self))));
 
   actor = CLUTTER_ACTOR (self);
 
-  child = clutter_actor_get_first_child (actor);
-  meta_surface_actor_set_frozen (META_SURFACE_ACTOR (child), TRUE);
+  clutter_actor_iter_init (&iter, actor);
+  while (clutter_actor_iter_next (&iter, &child))
+    meta_surface_actor_set_frozen (META_SURFACE_ACTOR (child), TRUE);
 
   if (success)
     {

@@ -54,6 +54,9 @@ struct _CoglVkImage
   uint32_t mip_levels; /* 1 unless generate_mipmap upgraded the image */
   VkSampleCountFlagBits samples; /* 1 unless MSAA offscreen */
   VkImageLayout layout;
+  /* A sampling barrier was recorded for the current contents, so further
+   * draws can read this image inside the open render pass. */
+  gboolean shader_read_synced;
   gboolean owns_memory;
   /* Imported DMA-BUF images require external queue ownership transfers. */
   gboolean is_dmabuf;
@@ -70,7 +73,11 @@ struct _CoglVkImage
   CoglVkImage *cold_rgba;
   /* Linear HOST_VISIBLE upload path (SIZE/bitmap textures). */
   gboolean host_visible;
-  /* Framebuffer created on demand when this image becomes a render target. */
+  /* Some command buffer has recorded a barrier on it, so the GPU may still
+   * be reading it; until then the CPU may write a host-visible image in
+   * place without waiting. */
+  gboolean gpu_used;
+  /* Lazily created for graphics draws. */
   VkFramebuffer framebuffer;
   VkRenderPass framebuffer_render_pass;
   /* Unowned DS companion used when creating a 2-attachment VkFramebuffer. */
@@ -119,8 +126,7 @@ CoglVkImage * cogl_vk_image_new_optimal_samples (CoglVkDevice          *device,
                                                  GError               **error);
 
 /* Prefer D24_UNORM_S8_UINT, then D32_SFLOAT_S8_UINT or D16_UNORM_S8_UINT.
- * Multisample storage uses the same sample count as the color attachment.
- */
+ * samples > 1 → MS packed DS matching MS color (B5/B6). */
 CoglVkImage * cogl_vk_image_new_depth_stencil (CoglVkDevice          *device,
                                                uint32_t               width,
                                                uint32_t               height,
@@ -189,6 +195,10 @@ CoglVkImage * cogl_vk_image_import_dmabuf (CoglVkDevice            *device,
                                            GError                 **error);
 
 void cogl_vk_image_free (CoglVkImage *image);
+
+/* Destroy now, without flushing or waiting: only for an image the GPU is
+ * known to be done with (a signaled retire ticket, or an idle device). */
+void cogl_vk_image_destroy_now (CoglVkImage *image);
 
 COGL_EXPORT void cogl_vk_image_cmd_barrier (CoglVkImage         *image,
                                             VkCommandBuffer      cmd,

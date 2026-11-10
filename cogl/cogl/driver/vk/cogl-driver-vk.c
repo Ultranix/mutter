@@ -33,6 +33,7 @@
 #include "cogl/driver/vk/cogl-pass-vk-private.h"
 #include "cogl/driver/vk/cogl-fence-vk-private.h"
 #include "cogl/driver/vk/cogl-vk-debug-private.h"
+#include "cogl/driver/vk/cogl-pipeline-vk-assemble-private.h"
 
 #include "cogl/cogl-private.h"
 #include "cogl/cogl-context-private.h"
@@ -106,8 +107,7 @@ cogl_driver_vk_store_sync_fd_from_pass (CoglDriverVk *driver)
 
   /* Offscreen flush has no external presenter and, like GL flush, must not
    * wait for GPU completion. The pass ticket retains in-flight resources;
-   * readback, finish and resource destruction perform their own waits.
-   */
+   * readback, finish and resource destruction perform their own waits. */
   if (driver->pending_drm_fd < 0)
     {
       if (driver->latest_sync_fd >= 0)
@@ -117,8 +117,7 @@ cogl_driver_vk_store_sync_fd_from_pass (CoglDriverVk *driver)
     }
 
   /* An external presenter must receive a current-frame fd, or wait for this
-   * submission on the CPU before presenting without one.
-   */
+   * submission on the CPU before presenting without one. */
   if (!driver->vk_device ||
       !driver->vk_device->has_external_semaphore_fd ||
       !driver->vk_device->vkGetSemaphoreFdKHR)
@@ -194,6 +193,66 @@ cogl_driver_vk_flush_current_pass (CoglDriverVk *driver)
   cogl_driver_vk_store_sync_fd_from_pass (driver);
   g_clear_pointer (&driver->current_pass, cogl_vk_pass_free);
   driver->flushing_current_pass = FALSE;
+}
+
+CoglVkRetireResult
+cogl_driver_vk_retire_list (CoglDriverVk      *driver,
+                            CoglVkRetireList **retire)
+{
+  CoglVkDevice *device;
+  CoglVkRetireList *newest = NULL;
+  uint64_t newest_serial = 0;
+
+  *retire = NULL;
+
+  if (!driver || !driver->vk_device || driver->flushing_current_pass)
+    return COGL_VK_RETIRE_UNAVAILABLE;
+
+  device = driver->vk_device;
+  if (device->device_lost)
+    return COGL_VK_RETIRE_UNAVAILABLE;
+
+  /* The recording pass is submitted after everything else. */
+  if (driver->current_pass && driver->current_pass->fence &&
+      !driver->current_pass->submitted)
+    {
+      *retire = &driver->current_pass->fence->retired;
+      return COGL_VK_RETIRE_DEFERRED;
+    }
+
+  /* A pass not yet parked in the fence pool cannot be ruled out below. */
+  if (driver->current_pass)
+    return COGL_VK_RETIRE_UNAVAILABLE;
+
+  if (!device->has_timeline_semaphore)
+    return COGL_VK_RETIRE_UNAVAILABLE;
+
+  /* Otherwise the newest submit still executing, pass or oneshot: its
+   * completion covers every earlier submit to the queue. */
+  cogl_vk_device_drain_fence_pool (device);
+  if (device->device_lost)
+    return COGL_VK_RETIRE_UNAVAILABLE;
+  if (device->fence_inflight && device->fence_inflight->len > 0)
+    {
+      CoglVkFenceTicket *ticket =
+        g_ptr_array_index (device->fence_inflight,
+                           device->fence_inflight->len - 1);
+
+      newest = &ticket->retired;
+      newest_serial = ticket->submit_serial;
+    }
+  if (device->oneshot_pending && device->oneshot_pending->len > 0)
+    {
+      CoglVkOneshotPending *pending =
+        g_ptr_array_index (device->oneshot_pending,
+                           device->oneshot_pending->len - 1);
+
+      if (pending->submit_serial > newest_serial)
+        newest = &pending->retired;
+    }
+
+  *retire = newest;
+  return newest ? COGL_VK_RETIRE_DEFERRED : COGL_VK_RETIRE_COMPLETE;
 }
 
 int
@@ -830,13 +889,9 @@ cogl_driver_vk_pipeline_pre_change_notify (CoglDriver        *driver,
                                            CoglPipelineState  change,
                                            const CoglColor   *new_color)
 {
-  /* State changes affect the cache key used by the next draw. Existing
-   * Vulkan pipelines remain valid for draws already recorded.
-   */
   (void) driver;
-  (void) pipeline;
-  (void) change;
   (void) new_color;
+  cogl_vk_assemble_pipeline_pre_change (pipeline, change, 0);
 }
 
 static void
@@ -846,9 +901,8 @@ cogl_driver_vk_pipeline_layer_pre_change_notify (CoglDriver             *driver,
                                                  CoglPipelineLayerState  change)
 {
   (void) driver;
-  (void) owner;
   (void) layer;
-  (void) change;
+  cogl_vk_assemble_pipeline_pre_change (owner, 0, change);
 }
 
 static void
@@ -1101,6 +1155,9 @@ add_stencil_clip_region (CoglDriverVk      *driver_vk,
                          -2.0f / cogl_framebuffer_get_viewport_height (framebuffer),
                          1.0f);
   graphene_matrix_translate (&matrix, &GRAPHENE_POINT3D_INIT (-1.f, 1.f, 0.f));
+  /* Region coordinates are in window space. Match the framebuffer's
+   * projection orientation, as with rectangle stencil clips. */
+  cogl_vk_maybe_bake_y_flip_projection (framebuffer, NULL, &matrix);
 
   if (!merge)
     vk_clear_stencil_attachment (driver_vk, fb_vk, setup);
@@ -1206,8 +1263,7 @@ cogl_driver_vk_clip_stack_flush (CoglDriver      *driver,
     {
       /* A flipped Cogl projection places its top at Vulkan NDC -1,
        * which is the top of a positive-height Vulkan viewport. The
-       * unflipped projection needs the same inversion as read_pixels.
-       */
+       * unflipped projection needs the same inversion as read_pixels. */
       int x = CLAMP (scissor_x0, 0, width);
       int y = CLAMP (scissor_y0, 0, height);
       int x2 = CLAMP (scissor_x1, 0, width);

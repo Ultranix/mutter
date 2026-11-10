@@ -25,6 +25,7 @@
 #include "wayland/meta-wayland.h"
 #include "wayland/meta-wayland-actor-surface.h"
 #include "wayland/meta-wayland-buffer.h"
+#include "wayland/meta-wayland-dnd-surface.h"
 #include "wayland/meta-wayland-surface-private.h"
 #include "wayland/meta-wayland-transaction.h"
 #include "wayland/meta-window-wayland.h"
@@ -64,6 +65,15 @@ should_show (MetaWaylandSurface *surface)
     return TRUE;
 }
 
+static gboolean
+is_dnd_subsurface (MetaWaylandSurface *surface)
+{
+  while (surface->applied_state.parent)
+    surface = surface->applied_state.parent;
+
+  return surface->role && META_IS_WAYLAND_SURFACE_ROLE_DND (surface->role);
+}
+
 static void
 sync_actor_subsurface_state (MetaWaylandSurface *surface)
 {
@@ -72,13 +82,15 @@ sync_actor_subsurface_state (MetaWaylandSurface *surface)
   int x, y;
 
   toplevel_window = meta_wayland_surface_get_toplevel_window (surface);
-  if (!toplevel_window || !should_show (surface))
+  if ((!toplevel_window && !is_dnd_subsurface (surface)) ||
+      !should_show (surface))
     {
       clutter_actor_hide (actor);
       return;
     }
 
-  if (toplevel_window->client_type == META_WINDOW_CLIENT_TYPE_X11)
+  if (toplevel_window &&
+      toplevel_window->client_type == META_WINDOW_CLIENT_TYPE_X11)
     return;
 
   x = y = 0;
@@ -258,7 +270,7 @@ meta_wayland_subsurface_sync_actor_state (MetaWaylandActorSurface *actor_surface
   MetaWaylandActorSurfaceClass *actor_surface_class =
     META_WAYLAND_ACTOR_SURFACE_CLASS (meta_wayland_subsurface_parent_class);
 
-  if (meta_wayland_surface_get_window (surface))
+  if (meta_wayland_surface_get_window (surface) || is_dnd_subsurface (surface))
     actor_surface_class->sync_actor_state (actor_surface);
 
   sync_actor_subsurface_state (surface);

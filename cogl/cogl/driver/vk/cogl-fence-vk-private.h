@@ -31,11 +31,14 @@
 
 G_BEGIN_DECLS
 
+struct _CoglVkImage;
+
 typedef struct
 {
   VkBuffer buffer;
   VkDeviceMemory memory;
 } CoglVkTransientBuffer;
+
 
 struct _CoglVkFenceTicket
 {
@@ -58,6 +61,11 @@ struct _CoglVkFenceTicket
   /* Imported wait semaphores remain alive until submission completion. */
   GArray *wait_semaphores; /* VkSemaphore */
   GArray *transient_buffers; /* CoglVkTransientBuffer, owned until completion */
+  /* Freed while this or an earlier submit may still use them; destroyed once
+   * the point is observed signaled (cogl_driver_vk_retire_list). */
+  CoglVkRetireList retired;
+  /* device->submit_serial of this ticket's last submit. */
+  uint64_t submit_serial;
 };
 
 CoglVkFenceTicket * cogl_vk_fence_ticket_acquire (CoglVkDevice *device,
@@ -79,6 +87,19 @@ gboolean cogl_vk_fence_ticket_poll_signaled (CoglVkFenceTicket *ticket);
  */
 void cogl_vk_fence_ticket_defer_command_buffer (CoglVkFenceTicket *ticket,
                                                 VkCommandBuffer    cb);
+
+/* Take ownership of an image (destroyed with cogl_vk_image_destroy_now) or a
+ * framebuffer / view handle. The owner of the list releases it once its
+ * submit is observed complete, or at teardown after the device is idle. */
+void cogl_vk_retire_list_add_image (CoglVkRetireList    *list,
+                                    struct _CoglVkImage *image);
+
+void cogl_vk_retire_list_add_handle (CoglVkRetireList  *list,
+                                     CoglVkRetiredKind  kind,
+                                     uint64_t           handle);
+
+void cogl_vk_retire_list_release (CoglVkRetireList *list,
+                                  CoglVkDevice     *device);
 
 /* Returns a new sync_file fd for KMS, or -1 on failure. Caller owns fd.
  * Marks the binary semaphore consumed; the recycle path recreates it before

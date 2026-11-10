@@ -21,6 +21,7 @@
 
 #include "cogl/driver/vk/cogl-image-vk-private.h"
 #include "cogl/driver/vk/cogl-driver-vk-private.h"
+#include "cogl/driver/vk/cogl-fence-vk-private.h"
 #include "cogl/driver/vk/cogl-vk-debug-private.h"
 
 #include <drm_fourcc.h>
@@ -1861,6 +1862,8 @@ cogl_vk_image_cmd_barrier (CoglVkImage         *image,
 
   g_return_if_fail (image != NULL);
 
+  image->gpu_used = TRUE;
+
   /* Imported scanout/client dmabufs stay owned by the display until the
    * graphics queue does a FOREIGN acquire. A plain barrier leaves eDP
    * reading zeros.
@@ -1906,6 +1909,7 @@ cogl_vk_image_cmd_barrier (CoglVkImage         *image,
   vkCmdPipelineBarrier (cmd, src_stage, dst_stage, 0,
                         0, NULL, 0, NULL, 1, &barrier);
   image->layout = new_layout;
+  image->shader_read_synced = FALSE;
 }
 
 static void
@@ -1982,6 +1986,7 @@ cogl_vk_image_cmd_foreign_acquire (CoglVkImage    *image,
                         dst_stage,
                         0, 0, NULL, 0, NULL, 1, &barrier);
   image->layout = new_layout;
+  image->shader_read_synced = FALSE;
   image->dmabuf_graphics_owned = TRUE;
 }
 
@@ -2037,22 +2042,47 @@ cogl_vk_image_cmd_foreign_release (CoglVkImage    *image,
                           0, 0, NULL, 0, NULL, 1, &barrier);
   }
   image->layout = new_layout;
+  image->shader_read_synced = FALSE;
   image->dmabuf_graphics_owned = FALSE;
 }
 
 void
 cogl_vk_image_free (CoglVkImage *image)
 {
-  uint32_t i;
-
   if (!image)
     return;
 
   /* Destroying a VkImage still referenced by a recording/submitted CB
    * invalidates that CB (validation: commandBuffer-recording) and leads to
-   * ANV DEVICE_LOST. WaitIdle alone is not enough while the CB is still
-   * recording — submit+free the driver's current pass first.
-   */
+   * ANV DEVICE_LOST. Hand it to the submit that proves it unused instead of
+   * draining the queue here: an animated offscreen is reallocated every
+   * frame, and a drain per free serialized CPU and GPU (size-change
+   * animation ~5 drains per frame). Imported dma-bufs too: a client that
+   * reallocates its buffers on resize frees one import per old buffer. The
+   * import holds the memory until destroyed, and a recording pass's foreign
+   * release still sees the image, which stays allocated until then. */
+  if (image->device && image->device->owner)
+    {
+      CoglVkRetireList *retire;
+      CoglVkRetireResult result =
+        cogl_driver_vk_retire_list (image->device->owner, &retire);
+
+      if (result == COGL_VK_RETIRE_DEFERRED)
+        {
+          cogl_vk_debug_log ("tex", "image_free retired img=%p %ux%u",
+                             (void *) image, image->width, image->height);
+          cogl_vk_retire_list_add_image (retire, image);
+          return;
+        }
+      if (result == COGL_VK_RETIRE_COMPLETE)
+        {
+          cogl_vk_image_destroy_now (image);
+          return;
+        }
+    }
+
+  /* WaitIdle alone is not enough while the CB is still recording —
+   * submit+free the driver's current pass first. */
   if (image->device && image->device->owner)
     cogl_driver_vk_flush_current_pass (image->device->owner);
 
@@ -2066,7 +2096,15 @@ cogl_vk_image_free (CoglVkImage *image)
       vkQueueWaitIdle (image->device->graphics_queue);
     }
 
-  g_clear_pointer (&image->cold_rgba, cogl_vk_image_free);
+  cogl_vk_image_destroy_now (image);
+}
+
+void
+cogl_vk_image_destroy_now (CoglVkImage *image)
+{
+  uint32_t i;
+
+  g_clear_pointer (&image->cold_rgba, cogl_vk_image_destroy_now);
 
   if (image->framebuffer != VK_NULL_HANDLE)
     vkDestroyFramebuffer (image->device->device, image->framebuffer, NULL);
@@ -2183,6 +2221,20 @@ cogl_vk_image_oneshot_clear_to_color_attachment (CoglVkImage *image,
                      "oneshot clear QueueSubmit failed (%d)", (int) res);
         goto fail_color;
       }
+
+    /* Queue order makes the clear visible to every later submit, including
+     * the frame that first draws to this image, so the CPU need not wait;
+     * an animated offscreen is allocated every frame. A dma-buf scanout BO
+     * keeps the wait: the display may read it without a later submit. */
+    if (!image->is_dmabuf)
+      {
+        cogl_vk_device_defer_oneshot (device, fence, cmd, pool);
+        cogl_vk_debug_log ("tex",
+                           "oneshot_clear queued img=%p %ux%u → COLOR_ATTACHMENT",
+                           (void *) image, image->width, image->height);
+        return TRUE;
+      }
+
     res = vkWaitForFences (device->device, 1, &fence, VK_TRUE, UINT64_MAX);
     if (res != VK_SUCCESS)
       {
@@ -2307,21 +2359,14 @@ cogl_vk_image_oneshot_clear_to_depth_stencil_attachment (CoglVkImage *image,
                      "oneshot DS clear QueueSubmit failed (%d)", (int) res);
         goto fail_ds;
       }
-    res = vkWaitForFences (device->device, 1, &fence, VK_TRUE, UINT64_MAX);
-    if (res != VK_SUCCESS)
-      {
-        g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
-                     "oneshot DS clear WaitFence failed (%d)", (int) res);
-        goto fail_ds;
-      }
 
+    /* Later submits are ordered after this clear; retain its fence and
+     * command buffer until completion instead of blocking the CPU. */
+    cogl_vk_device_defer_oneshot (device, fence, cmd, pool);
     cogl_vk_debug_log (
       "tex",
-      "oneshot_clear OK img=%p %ux%u → DEPTH_STENCIL_ATTACHMENT",
+      "oneshot_clear queued img=%p %ux%u → DEPTH_STENCIL_ATTACHMENT",
       (void *) image, image->width, image->height);
-
-    vkDestroyFence (device->device, fence, NULL);
-    vkFreeCommandBuffers (device->device, pool, 1, &cmd);
     return TRUE;
 
 fail_ds:

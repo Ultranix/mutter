@@ -663,6 +663,7 @@ cogl_vk_assemble_pipeline_glsl (CoglPipeline                 *pipeline,
                               "layout(location = 0) %sin vec4 _cogl_tex_coord[%d];\n"
                               "layout(location = %d) %sin vec4 v_color;\n",
                               interpolation, n_layers, color_loc, interpolation);
+      g_string_append (frag, "#define cogl_tex_coord_in _cogl_tex_coord\n");
     }
   else
     {
@@ -817,7 +818,6 @@ cogl_vk_assemble_pipeline_glsl (CoglPipeline                 *pipeline,
       CoglPipelineLayerBigState *bs;
       CoglPipelineSnippetList *layer_snips;
       int idx;
-      float constv[4] = { 0, 0, 0, 0 };
 
       if (!layer)
         continue;
@@ -827,12 +827,6 @@ cogl_vk_assemble_pipeline_glsl (CoglPipeline                 *pipeline,
       combine_auth = _cogl_pipeline_layer_get_authority
                        (layer, COGL_PIPELINE_LAYER_STATE_COMBINE);
       bs = combine_auth->big_state;
-
-      _cogl_pipeline_get_layer_combine_constant (pipeline, idx, constv);
-      g_string_append_printf (header,
-                              "const vec4 cogl_layer_const%i = "
-                              "vec4(%f, %f, %f, %f);\n",
-                              idx, constv[0], constv[1], constv[2], constv[3]);
 
       g_string_append_printf (header, "vec4 cogl_layer%i;\n", idx);
 
@@ -898,8 +892,7 @@ cogl_vk_assemble_pipeline_glsl (CoglPipeline                 *pipeline,
   g_string_append (frag_source,
                    "void\n"
                    "cogl_generated_source ()\n"
-                   "{\n"
-                   "  _cogl_color_in = v_color;\n");
+                   "{\n");
 
   for (i = 0; i < n_layers; i++)
     {
@@ -974,13 +967,21 @@ cogl_vk_assemble_pipeline_glsl (CoglPipeline                 *pipeline,
     snippet_data.snippets = snippets_or_empty (frag_snippets);
     snippet_data.hook = COGL_SNIPPET_HOOK_FRAGMENT;
     snippet_data.chain_function = "cogl_generated_source";
-    snippet_data.final_name = "main";
+    snippet_data.final_name = "cogl_fragment_main";
     snippet_data.function_prefix = "cogl_fragment_hook";
     snippet_data.source_buf = frag_source;
     _cogl_pipeline_snippet_generate_code (&snippet_data);
   }
 
   g_string_append (frag, frag_source->str);
+  /* Fragment replacement hooks bypass the generated body, but still need
+   * the interpolated input color before their pre/replace/post code runs. */
+  g_string_append (frag,
+                   "void main ()\n"
+                   "{\n"
+                   "  _cogl_color_in = v_color;\n"
+                   "  cogl_fragment_main ();\n"
+                   "}\n");
 
   /* --- Vertex (GL vertend: per-layer texcoord + matrix + hook wrap) --- */
   g_string_append (vert,
@@ -1485,18 +1486,94 @@ cogl_vk_assemble_pipeline_glsl (CoglPipeline                 *pipeline,
   return TRUE;
 }
 
+/* Vulkan bakes alpha reference and point size into GLSL. Texture identity and
+ * matrices, color, uniforms and combine constants are runtime inputs; an
+ * opacity animation changes a combine constant on every frame.
+ * Wrap modes are compared separately; filtering does not affect GLSL. */
+#define PIPELINE_CODEGEN_STATE (COGL_PIPELINE_STATE_ALPHA_FUNC | \
+                                COGL_PIPELINE_STATE_ALPHA_FUNC_REFERENCE | \
+                                COGL_PIPELINE_STATE_POINT_SIZE | \
+                                COGL_PIPELINE_STATE_PER_VERTEX_POINT_SIZE | \
+                                COGL_PIPELINE_STATE_VERTEX_SNIPPETS | \
+                                COGL_PIPELINE_STATE_FRAGMENT_SNIPPETS)
+#define LAYER_CODEGEN_STATE (COGL_PIPELINE_LAYER_STATE_ALL_SPARSE & \
+                             ~(COGL_PIPELINE_LAYER_STATE_TEXTURE_DATA | \
+                               COGL_PIPELINE_LAYER_STATE_USER_MATRIX | \
+                               COGL_PIPELINE_LAYER_STATE_COMBINE_CONSTANT | \
+                               COGL_PIPELINE_LAYER_STATE_SAMPLER))
+
+static const char fingerprint_cache_key[] = "cogl-vk-assemble-fingerprint";
+static const char fingerprint_layout_key[] = "cogl-vk-assemble-layout";
+
 typedef struct
 {
-  unsigned int age;
-  char *fingerprint;
-} PipelineFingerprint;
+  int index;
+  int wrap_s;
+  int wrap_t;
+} LayerCodegen;
 
-static void
-pipeline_fingerprint_free (gpointer data)
+typedef struct
 {
-  PipelineFingerprint *cached = data;
-  g_free (cached->fingerprint);
-  g_free (cached);
+  LayerCodegen *indices;
+  int position;
+  gboolean equal;
+} LayerIndices;
+
+static int
+codegen_wrap (CoglSamplerCacheWrapMode wrap)
+{
+  if ((int) wrap == COGL_PIPELINE_WRAP_MODE_REPEAT ||
+      (int) wrap == COGL_PIPELINE_WRAP_MODE_MIRRORED_REPEAT)
+    return wrap;
+  return COGL_PIPELINE_WRAP_MODE_CLAMP_TO_EDGE;
+}
+
+static LayerCodegen
+layer_codegen (CoglPipelineLayer *layer)
+{
+  CoglSamplerCacheWrapMode wrap_s, wrap_t;
+
+  _cogl_pipeline_layer_get_wrap_modes (layer, &wrap_s, &wrap_t);
+  return (LayerCodegen) {
+           .index = layer->index,
+           .wrap_s = codegen_wrap (wrap_s),
+           .wrap_t = codegen_wrap (wrap_t),
+  };
+}
+
+static gboolean
+collect_layer_index (CoglPipelineLayer *layer,
+                     void              *user_data)
+{
+  LayerIndices *data = user_data;
+
+  data->indices[data->position++] = layer_codegen (layer);
+  return TRUE;
+}
+
+static gboolean
+compare_layer_index (CoglPipelineLayer *layer,
+                     void              *user_data)
+{
+  LayerIndices *data = user_data;
+
+  LayerCodegen state = layer_codegen (layer);
+
+  data->equal = memcmp (&data->indices[data->position++], &state, sizeof (state)) == 0;
+  return data->equal;
+}
+
+void
+cogl_vk_assemble_pipeline_pre_change (CoglPipeline           *pipeline,
+                                      CoglPipelineState       pipeline_change,
+                                      CoglPipelineLayerState  layer_change)
+{
+  if ((pipeline_change & (PIPELINE_CODEGEN_STATE | COGL_PIPELINE_STATE_LAYERS)) ||
+      (layer_change & LAYER_CODEGEN_STATE))
+    {
+      g_object_set_data (G_OBJECT (pipeline), fingerprint_cache_key, NULL);
+      g_object_set_data (G_OBJECT (pipeline), fingerprint_layout_key, NULL);
+    }
 }
 
 char *
@@ -1506,25 +1583,41 @@ cogl_vk_assemble_pipeline_fingerprint (CoglPipeline *pipeline)
   g_autoptr (GChecksum) sum = NULL;
   CoglVkAssembleResult assembled = {0};
   g_autoptr (GError) err = NULL;
-  PipelineFingerprint *cached;
+  const char *cached;
   CoglPipeline *authority;
-  const char *cache_key = "cogl-vk-assemble-fingerprint";
+  int n_layers = cogl_pipeline_get_n_layers (pipeline);
+  LayerIndices indices = {
+    .indices = g_alloca (sizeof (LayerCodegen) * n_layers),
+    .equal = TRUE,
+  };
+  size_t layout_size = sizeof (LayerCodegen) * n_layers;
+  GBytes *cached_layout;
 
-  /* Share with an equivalent ancestor, as the GL shader caches do.
-   * Pipeline color and uniform values are runtime inputs, not GLSL literals.
-   * Keep every other sparse state and all layer state in the equivalence
-   * test, including Vulkan's baked alpha reference and combine constants.
-   * Copy-on-write preserves descendants when an authority changes.
-   */
+  _cogl_pipeline_foreach_layer_internal (pipeline, collect_layer_index, &indices);
+
+  /* Share with an ancestor that generates the same shader. Pre-change
+   * notifications invalidate codegen changes; the pipeline's overall age
+   * also changes for runtime inputs and cannot serve as a shader version.
+   * Copy-on-write preserves descendants when an authority changes. */
   authority = _cogl_pipeline_find_equivalent_parent (
     pipeline,
-    COGL_PIPELINE_STATE_ALL_SPARSE & ~(COGL_PIPELINE_STATE_COLOR |
-                                       COGL_PIPELINE_STATE_UNIFORMS |
-                                       COGL_PIPELINE_STATE_LAYERS),
-    COGL_PIPELINE_LAYER_STATE_ALL_SPARSE);
-  cached = g_object_get_data (G_OBJECT (authority), cache_key);
-  if (cached && cached->age == authority->age)
-    return g_strdup (cached->fingerprint);
+    PIPELINE_CODEGEN_STATE, LAYER_CODEGEN_STATE);
+  if (authority != pipeline)
+    {
+      /* Logical indices appear in snippet names and generated declarations.
+       * Cogl's sparse layer-state comparison only covers texture units. */
+      indices.position = 0;
+      _cogl_pipeline_foreach_layer_internal (authority, compare_layer_index, &indices);
+      if (!indices.equal)
+        authority = pipeline;
+    }
+  cached = g_object_get_data (G_OBJECT (authority), fingerprint_cache_key);
+  cached_layout = g_object_get_data (G_OBJECT (authority), fingerprint_layout_key);
+  if (cached && cached_layout &&
+      g_bytes_get_size (cached_layout) == layout_size &&
+      (layout_size == 0 ||
+       memcmp (g_bytes_get_data (cached_layout, NULL), indices.indices, layout_size) == 0))
+    return g_strdup (cached);
   sum = g_checksum_new (G_CHECKSUM_SHA1);
 
   if (!cogl_vk_assemble_pipeline_glsl (pipeline,
@@ -1538,10 +1631,11 @@ cogl_vk_assemble_pipeline_fingerprint (CoglPipeline *pipeline)
   g_checksum_update (sum, (const unsigned char *) assembled.frag_glsl,
                      strlen (assembled.frag_glsl));
   cogl_vk_assemble_result_clear (&assembled);
-  cached = g_new0 (PipelineFingerprint, 1);
-  cached->age = authority->age;
-  cached->fingerprint = g_strdup (g_checksum_get_string (sum));
-  g_object_set_data_full (G_OBJECT (authority), cache_key, cached,
-                          pipeline_fingerprint_free);
-  return g_strdup (cached->fingerprint);
+  cached = g_checksum_get_string (sum);
+  g_object_set_data_full (G_OBJECT (authority), fingerprint_cache_key,
+                          g_strdup (cached), g_free);
+  g_object_set_data_full (G_OBJECT (authority), fingerprint_layout_key,
+                          g_bytes_new (indices.indices, layout_size),
+                          (GDestroyNotify) g_bytes_unref);
+  return g_strdup (cached);
 }

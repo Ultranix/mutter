@@ -3128,7 +3128,7 @@ handle_net_restack_window (MetaDisplay *display,
 
 typedef struct {
   ClutterSprite *sprite;
-  graphene_point_t device_point;
+  float distance_squared;
   graphene_point_t coords;
   int button;
 } NearestDeviceData;
@@ -3144,6 +3144,7 @@ nearest_device_func (ClutterStage  *stage,
   NearestDeviceData *data = user_data;
   graphene_point_t point;
   ClutterModifierType mods;
+  float dx, dy, distance_squared;
   const int nearest_threshold = 64;
 
   clutter_seat_query_state (seat, sprite, &point, &mods);
@@ -3166,13 +3167,19 @@ nearest_device_func (ClutterStage  *stage,
         return TRUE;
     }
 
-  if (ABS (point.x - data->coords.x) < nearest_threshold &&
-      ABS (point.y - data->coords.y) < nearest_threshold &&
-      ABS (point.x - data->coords.x) < ABS (data->device_point.x - data->coords.x) &&
-      ABS (point.y - data->coords.y) < ABS (data->device_point.y - data->coords.y))
+  dx = point.x - data->coords.x;
+  dy = point.y - data->coords.y;
+  distance_squared = dx * dx + dy * dy;
+
+  /* The first eligible device has no previous candidate to compare against.
+   * In particular, (0, 0) is not an initial device position: using it would
+   * reject valid requests near a screen edge after the pointer moved. */
+  if (ABS (dx) < nearest_threshold &&
+      ABS (dy) < nearest_threshold &&
+      (!data->sprite || distance_squared < data->distance_squared))
     {
       data->sprite = sprite;
-      data->device_point = point;
+      data->distance_squared = distance_squared;
     }
 
   return TRUE;

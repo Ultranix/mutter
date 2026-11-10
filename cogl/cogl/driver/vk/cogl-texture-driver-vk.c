@@ -21,6 +21,7 @@
 
 #include "cogl/driver/vk/cogl-texture-driver-vk-private.h"
 #include "cogl/driver/vk/cogl-driver-vk-private.h"
+#include "cogl/driver/vk/cogl-fence-vk-private.h"
 #include "cogl/driver/vk/cogl-pipeline-vk-private.h"
 #include "cogl/driver/vk/cogl-dmabuf-memo-vk-private.h"
 #include "cogl/driver/vk/cogl-framebuffer-vk-private.h"
@@ -419,6 +420,7 @@ cogl_texture_2d_vk_generate_mipmap (CoglTexture2D *tex_2d)
                           VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                           0, 0, NULL, 0, NULL, n_barriers, barriers);
     src->layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    src->shader_read_synced = FALSE;
   }
 
   cogl_texture_2d_vk_retire_replaced_image (tex_vk, old_image);
@@ -1007,6 +1009,7 @@ upload_mip_level_via_staging (CoglTexture2DVk *tex_vk,
                          VK_ACCESS_TRANSFER_WRITE_BIT,
                          VK_ACCESS_SHADER_READ_BIT);
   upload_img->layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+  upload_img->shader_read_synced = FALSE;
 
   res = vkEndCommandBuffer (cmd);
   if (res != VK_SUCCESS)
@@ -1024,9 +1027,24 @@ upload_mip_level_via_staging (CoglTexture2DVk *tex_vk,
   if (res != VK_SUCCESS)
     goto out;
 
-  res = vkWaitForFences (device->device, 1, &fence, VK_TRUE, UINT64_MAX);
-  if (res != VK_SUCCESS)
-    goto out;
+  /* Later submits, including the pass that samples the texture next, are
+   * ordered after the copy, so nothing waits; the staging buffer lives until
+   * the copy completes. */
+  {
+    CoglVkOneshotPending *pending =
+      cogl_vk_device_defer_oneshot (device, fence, cmd, cmd_pool);
+
+    cogl_vk_retire_list_add_handle (&pending->retired,
+                                    COGL_VK_RETIRED_BUFFER,
+                                    (uint64_t) staging);
+    cogl_vk_retire_list_add_handle (&pending->retired,
+                                    COGL_VK_RETIRED_MEMORY,
+                                    (uint64_t) staging_mem);
+    fence = VK_NULL_HANDLE;
+    cmd = VK_NULL_HANDLE;
+    staging = VK_NULL_HANDLE;
+    staging_mem = VK_NULL_HANDLE;
+  }
 
   if (replace)
     {
@@ -1069,6 +1087,124 @@ out:
     g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED,
                          "Vulkan mip level upload failed");
   return ok;
+}
+
+/* Copy-on-write partial update of a host-visible image the GPU may still be
+ * sampling: a new image gets the old contents plus the region, and the old
+ * one is retired with the submits that use it (cogl_vk_image_free). The CPU
+ * only reads the old image, which no command writes since it backs no
+ * framebuffer, so nothing waits — a waiting upload stalled the compositor
+ * on every frame a software-rendered client committed, e.g. while it
+ * redrew during a maximize animation. */
+static gboolean
+replace_host_visible_region (CoglTexture2DVk *tex_vk,
+                             CoglVkDevice    *device,
+                             CoglDriverVk    *driver_vk,
+                             const uint8_t   *data,
+                             int              rowstride,
+                             uint32_t         bpp,
+                             int              src_x,
+                             int              src_y,
+                             int              width,
+                             int              height,
+                             int              dst_x,
+                             int              dst_y,
+                             GError         **error)
+{
+  CoglVkImage *old_image = tex_vk->image;
+  VkImageSubresource sub = {
+    .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+  };
+  VkSubresourceLayout src_layout, dst_layout;
+  size_t row = (size_t) old_image->width * bpp;
+  size_t left = (size_t) dst_x * bpp;
+  size_t right = (size_t) (dst_x + width) * bpp;
+  gboolean full_update = dst_x == 0 && dst_y == 0 &&
+                         width == old_image->width &&
+                         height == old_image->height;
+  void *src_mapping = NULL, *dst_mapping = NULL;
+  gboolean dst_mapped = FALSE;
+  CoglVkImage *img;
+  VkResult res;
+  uint32_t y;
+
+  img = cogl_vk_image_new_host_visible (device,
+                                        old_image->width, old_image->height,
+                                        old_image->format,
+                                        old_image->cogl_format,
+                                        NULL, 0, error);
+  if (!img)
+    return FALSE;
+
+  vkGetImageSubresourceLayout (device->device, img->image, &sub, &dst_layout);
+  res = vkMapMemory (device->device, img->memories[0], 0,
+                     VK_WHOLE_SIZE, 0, &dst_mapping);
+  if (res != VK_SUCCESS)
+    goto map_failed;
+
+  dst_mapped = TRUE;
+
+  if (!full_update)
+    {
+      vkGetImageSubresourceLayout (device->device, old_image->image,
+                                   &sub, &src_layout);
+      res = vkMapMemory (device->device, old_image->memories[0], 0,
+                         VK_WHOLE_SIZE, 0, &src_mapping);
+      if (res != VK_SUCCESS)
+        goto map_failed;
+    }
+
+  /* Populate the new allocation directly. Do not copy the patched bytes
+   * from the old image, or allocate an intermediate full-image snapshot.
+   * The old image remains read-only until its GPU uses have completed. */
+  for (y = 0; y < old_image->height; y++)
+    {
+      uint8_t *dst_row = (uint8_t *) dst_mapping + dst_layout.offset +
+                         y * dst_layout.rowPitch;
+      const uint8_t *src_row = src_mapping ?
+                               (uint8_t *) src_mapping + src_layout.offset + y * src_layout.rowPitch :
+                               NULL;
+
+      if (y < dst_y || y >= dst_y + height)
+        memcpy (dst_row, src_row, row);
+      else
+        {
+          if (left)
+            memcpy (dst_row, src_row, left);
+          if (right < row)
+            memcpy (dst_row + right, src_row + right, row - right);
+          memcpy (dst_row + left,
+                  data + (size_t) (src_y + y - dst_y) * rowstride +
+                  (size_t) src_x * bpp,
+                  (size_t) width * bpp);
+        }
+    }
+
+  if (src_mapping)
+    vkUnmapMemory (device->device, old_image->memories[0]);
+  vkUnmapMemory (device->device, img->memories[0]);
+
+  if (tex_vk->descriptor_set != VK_NULL_HANDLE)
+    {
+      if (driver_vk->pipeline_cache)
+        cogl_vk_pipeline_free_texture_ds (driver_vk->pipeline_cache,
+                                          old_image->is_ycbcr,
+                                          tex_vk->descriptor_set);
+      tex_vk->descriptor_set = VK_NULL_HANDLE;
+    }
+
+  tex_vk->image = img;
+  cogl_texture_2d_vk_retire_replaced_image (tex_vk, old_image);
+  return TRUE;
+
+map_failed:
+  if (dst_mapped)
+    vkUnmapMemory (device->device, img->memories[0]);
+  /* The replacement has never been submitted, so no queue wait is needed. */
+  cogl_vk_image_destroy_now (img);
+  g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+               "vkMapMemory failed (%d)", (int) res);
+  return FALSE;
 }
 
 static gboolean
@@ -1207,28 +1343,46 @@ cogl_texture_2d_vk_copy_from_bitmap (CoglTexture2D  *tex_2d,
      * (a damaged client window is redrawn the same frame its buffer updates).
      * Writing the mapped image underneath that pass races the GPU read: a
      * scrolling terminal, which lands several damage rectangles per frame,
-     * shows torn / jumbled rows. Submit the pass first so any sampling of the
-     * old contents completes before the CPU overwrites them; the memory is
-     * HOST_COHERENT, so the next pass sees the new bytes without a flush.
-     */
-    if (!flush_current_pass_for_upload (driver_vk, error))
+     * shows torn / jumbled rows. An image no command has used yet (as one
+     * just copied below, for the next rectangle) is written in place. */
+    if (tex_vk->image->gpu_used &&
+        !_cogl_texture_get_associated_framebuffers (COGL_TEXTURE (tex_vk)))
       {
-        cogl_bitmap_unmap (src_bmp);
-        return FALSE;
-      }
-    /* Flush only submits. CPU writes must also wait for earlier sampling,
-     * even if that pass was already submitted by a previous frame.
-     */
-    res = vkQueueWaitIdle (device->graphics_queue);
-    cogl_vk_device_note_vk_result (device, res);
-    if (res != VK_SUCCESS)
-      {
-        cogl_bitmap_unmap (src_bmp);
-        g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
-                     "Texture upload wait failed (%d)", (int) res);
-        return FALSE;
-      }
+        gboolean ok;
 
+        cogl_vk_debug_log ("tex", "upload: copy-on-write %dx%d into %ux%u",
+                           width, height, tex_vk->image->width,
+                           tex_vk->image->height);
+        ok = replace_host_visible_region (tex_vk, device, driver_vk,
+                                          data, rowstride, bpp,
+                                          src_x, src_y, width, height,
+                                          dst_x, dst_y, error);
+        cogl_bitmap_unmap (src_bmp);
+        return ok;
+      }
+    if (tex_vk->image->gpu_used)
+      {
+        /* Rendered into, so its contents may still be in flight: submit the
+         * pass so earlier sampling completes before the CPU overwrites it;
+         * the memory is HOST_COHERENT, so the next pass sees the new bytes
+         * without a flush. Flush only submits; CPU writes must also wait for
+         * earlier sampling, even if that pass was submitted a frame ago. */
+        cogl_vk_debug_log ("tex", "upload: WaitIdle before in-place write");
+        if (!flush_current_pass_for_upload (driver_vk, error))
+          {
+            cogl_bitmap_unmap (src_bmp);
+            return FALSE;
+          }
+        res = vkQueueWaitIdle (device->graphics_queue);
+        cogl_vk_device_note_vk_result (device, res);
+        if (res != VK_SUCCESS)
+          {
+            cogl_bitmap_unmap (src_bmp);
+            g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                         "Texture upload wait failed (%d)", (int) res);
+            return FALSE;
+          }
+      }
     vkGetImageSubresourceLayout (device->device, tex_vk->image->image, &sub,
                                  &layout);
     res = vkMapMemory (device->device, tex_vk->image->memories[0], 0,
@@ -1290,17 +1444,17 @@ allocate_with_size (CoglTexture2DVk   *tex_vk,
   /* DEVICE_LOCAL OPTIMAL for sized textures (incl. offscreen FBO targets).
    * Host-visible linear COLOR_ATTACHMENT caused Intel ANV DEVICE_LOST on
    * 512² offscreen + sample, and CPU map of host-visible after GPU render
-   * returned stale init pixels (journal → #ffffffff). get_data uses staging.
-   */
-  if (driver_vk && driver_vk->current_pass)
+   * returned stale init pixels (journal → #ffffffff). get_data uses staging. */
+  /* Only replacing an image needs the open CB submitted first — destroying a
+   * VkImage still referenced by a recording CB invalidates it (validation:
+   * commandBuffer-recording / wrap-modes DEVICE_LOST). A first allocation
+   * creates an image no recorded command uses, and its clear is queued ahead
+   * of the pass; not submitting mid-frame keeps an offscreen reallocated
+   * every frame (size-change animation) inside the frame's one submit. */
+  if (driver_vk && driver_vk->current_pass && tex_vk->image)
     {
       g_autoptr (GError) flush_error = NULL;
 
-      /* Submit any open CB before creating/replacing images — destroying a
-       * VkImage still referenced by a recording CB invalidates it
-       * (validation:
-       * commandBuffer-recording / wrap-modes DEVICE_LOST).
-       */
       if (!flush_current_pass_for_upload (driver_vk, &flush_error))
         {
           if (error && flush_error)

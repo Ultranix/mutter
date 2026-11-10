@@ -26,6 +26,7 @@
 #include "cogl/driver/vk/cogl-pipeline-vk-glsl-private.h"
 #include "cogl/driver/vk/cogl-pipeline-vk-vbo-private.h"
 #include "cogl/driver/vk/cogl-pass-vk-private.h"
+#include "cogl/driver/vk/cogl-fence-vk-private.h"
 #include "cogl/driver/vk/cogl-vk-debug-private.h"
 
 #include "cogl/cogl-private.h"
@@ -239,12 +240,34 @@ cogl_vk_renderbuffers_free (CoglRenderbuffers *rb)
   if (rb->depth_stencil)
     {
       CoglVkDevice *device = rb->depth_stencil->device;
-      cogl_driver_vk_flush_current_pass (device->owner);
-      vkQueueWaitIdle (device->graphics_queue);
-      if (rb->depth_view)
-        vkDestroyImageView (device->device, rb->depth_view, NULL);
-      if (rb->stencil_view)
-        vkDestroyImageView (device->device, rb->stencil_view, NULL);
+      CoglVkRetireList *retire;
+      CoglVkRetireResult result =
+        cogl_driver_vk_retire_list (device->owner, &retire);
+
+      /* Offscreens are reallocated every frame while their size animates;
+       * retire the views with the submit that last used them rather than
+       * draining the queue (see cogl_vk_image_free). */
+      if (result == COGL_VK_RETIRE_DEFERRED)
+        {
+          if (rb->depth_view)
+            cogl_vk_retire_list_add_handle (retire, COGL_VK_RETIRED_IMAGE_VIEW,
+                                            (uint64_t) rb->depth_view);
+          if (rb->stencil_view)
+            cogl_vk_retire_list_add_handle (retire, COGL_VK_RETIRED_IMAGE_VIEW,
+                                            (uint64_t) rb->stencil_view);
+        }
+      else
+        {
+          if (result == COGL_VK_RETIRE_UNAVAILABLE)
+            {
+              cogl_driver_vk_flush_current_pass (device->owner);
+              vkQueueWaitIdle (device->graphics_queue);
+            }
+          if (rb->depth_view)
+            vkDestroyImageView (device->device, rb->depth_view, NULL);
+          if (rb->stencil_view)
+            vkDestroyImageView (device->device, rb->stencil_view, NULL);
+        }
     }
   if (rb->depth != rb->depth_stencil)
     g_clear_pointer (&rb->depth, cogl_vk_image_free);
@@ -271,8 +294,7 @@ cogl_vk_renderbuffers_unref (CoglRenderbuffers *rb)
 
 /* Cogl shares renderbuffer sets as a whole. Independent depth/stencil
  * handles use disjoint aspect views of one Vulkan attachment, preserving
- * independent aspect contents without copying or discarding either one.
- */
+ * independent aspect contents without copying or discarding either one. */
 static CoglVkImage *
 renderbuffers_draw_ds (CoglRenderbuffers *rb)
 {
@@ -415,8 +437,7 @@ rb_matches (CoglRenderbuffers         *rb,
 }
 
 /* Try GL-ordered allocate flags; explicit independent storage is also
- * supported through the remembered allocation flags.
- */
+ * supported through the remembered allocation flags. */
 static CoglRenderbuffers *
 try_allocate_renderbuffers (CoglDriverVk          *driver_vk,
                             uint32_t               width,
@@ -2518,19 +2539,34 @@ static void
 destroy_color_framebuffer (CoglVkImage *color)
 {
   VkResult res;
+  CoglVkRetireList *retire;
+  CoglVkRetireResult result;
 
   if (!color || color->framebuffer == VK_NULL_HANDLE || !color->device)
     return;
 
-  /* Flush is asynchronous, including for offscreen targets. Retire the
-   * framebuffer only after recorded and submitted uses have completed.
-   */
-  if (color->device->owner)
-    cogl_driver_vk_flush_current_pass (color->device->owner);
-  res = vkQueueWaitIdle (color->device->graphics_queue);
-  cogl_vk_device_note_vk_result (color->device, res);
-  if (res != VK_SUCCESS && res != VK_ERROR_DEVICE_LOST)
-    g_error ("Cogl Vulkan: cannot retire framebuffer (%d)", (int) res);
+  /* Retire the framebuffer only after recorded and submitted uses have
+   * completed: with the submit that proves it, else by draining. */
+  result = cogl_driver_vk_retire_list (color->device->owner, &retire);
+  if (result == COGL_VK_RETIRE_DEFERRED)
+    {
+      cogl_vk_retire_list_add_handle (retire, COGL_VK_RETIRED_FRAMEBUFFER,
+                                      (uint64_t) color->framebuffer);
+      color->framebuffer = VK_NULL_HANDLE;
+      color->framebuffer_render_pass = VK_NULL_HANDLE;
+      color->framebuffer_ds = NULL;
+      return;
+    }
+
+  if (result == COGL_VK_RETIRE_UNAVAILABLE)
+    {
+      if (color->device->owner)
+        cogl_driver_vk_flush_current_pass (color->device->owner);
+      res = vkQueueWaitIdle (color->device->graphics_queue);
+      cogl_vk_device_note_vk_result (color->device, res);
+      if (res != VK_SUCCESS && res != VK_ERROR_DEVICE_LOST)
+        g_error ("Cogl Vulkan: cannot retire framebuffer (%d)", (int) res);
+    }
 
   vkDestroyFramebuffer (color->device->device, color->framebuffer, NULL);
   color->framebuffer = VK_NULL_HANDLE;
@@ -2572,8 +2608,7 @@ cogl_framebuffer_vk_dispose (GObject *object)
                 error ? error->message : "?");
             }
           /* Pass tickets defer command buffer retirement. The framebuffer
-           * and attachment teardown below waits before destroying objects.
-           */
+           * and attachment teardown below waits before destroying objects. */
           cogl_driver_vk_store_sync_fd_from_pass (driver_vk);
           g_clear_pointer (&driver_vk->current_pass, cogl_vk_pass_free);
         }
