@@ -16,6 +16,26 @@ Related upstream work item:
 
 More detail: [doc/vulkan.md](doc/vulkan.md).
 
+## Fork releases
+
+Release **1.1** integrates upstream `main` through `b766717ac9` and the
+subsequent Vulkan resource lifetime and rendering changes. Release **1.0**
+preserves the previous GitHub `main` at `d7fbd2fc953b`. These are fork release
+numbers; Mutter's upstream version and library ABI keep their upstream names.
+
+Changes in 1.1 include deferred destruction of GPU resources, asynchronous
+texture uploads and attachment initialization, texture copy-on-write without
+an intermediate full-image copy, mapped buffer storage, bounded vertex
+snapshot reuse, shader fingerprint reuse, and fewer render pass breaks for
+textures already synchronized for sampling. The Vulkan driver also persists
+its pipeline cache, requests a high-priority graphics queue when permitted,
+and provides optional GPU timing diagnostics through `COGL_VK_GPU_TRACE`.
+
+Related fixes cover YUV shader coefficients, sparse texture matrix uniforms,
+drag icons containing subsurfaces, and Xwayland pointer selection for window
+move/resize requests. The existing backend-independent rendering interfaces
+are retained. See [CHANGELOG.md](CHANGELOG.md) for the release history.
+
 ## Quick start
 
 ```sh
