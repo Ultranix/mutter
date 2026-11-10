@@ -23,7 +23,6 @@
 #include <fcntl.h>
 #include <glib/gstdio.h>
 #include <linux/dma-buf.h>
-#include <poll.h>
 #include <sys/ioctl.h>
 #include <sys/timerfd.h>
 #include <xf86drm.h>
@@ -499,33 +498,15 @@ meta_kms_impl_device_dispatch (MetaKmsImplDevice  *impl_device,
 
   fd = meta_device_file_get_fd (priv->device_file);
 
-  while (TRUE)
+  if (drmHandleEvent (fd, &drm_event_context) != 0)
     {
-      if (drmHandleEvent (fd, &drm_event_context) != 0)
-        {
-          struct pollfd pfd;
-          int ret;
+      if (errno == EAGAIN)
+        return TRUE;
 
-          if (errno != EAGAIN)
-            {
-              g_set_error_literal (error, G_IO_ERROR,
-                                   g_io_error_from_errno (errno),
-                                   strerror (errno));
-              return FALSE;
-            }
-
-          pfd.fd = fd;
-          pfd.events = POLL_IN | POLL_ERR;
-          do
-            {
-              ret = poll (&pfd, 1, -1);
-            }
-          while (ret == -1 && errno == EINTR);
-        }
-      else
-        {
-          break;
-        }
+      g_set_error_literal (error, G_IO_ERROR,
+                           g_io_error_from_errno (errno),
+                           strerror (errno));
+      return FALSE;
     }
 
   return TRUE;
@@ -1159,7 +1140,7 @@ meta_kms_impl_device_update_states (MetaKmsImplDevice *impl_device,
   if (!ensure_device_file (impl_device, &error))
     {
       g_warning ("Failed to reopen '%s': %s", priv->path, error->message);
-      goto err;
+      return META_KMS_RESOURCE_CHANGE_NONE;
     }
 
   ensure_latched_fd_hold (impl_device);
@@ -1172,7 +1153,11 @@ meta_kms_impl_device_update_states (MetaKmsImplDevice *impl_device,
       meta_topic (META_DEBUG_KMS, "Device '%s' didn't return any resources",
                   priv->path);
       meta_thread_uninhibit_realtime_in_impl (thread);
-      goto err;
+
+      if (!had_fd_open)
+        clear_latched_fd_hold (impl_device);
+
+      return META_KMS_RESOURCE_CHANGE_NONE;
     }
 
   changes = update_connectors (impl_device, drm_resources, connector_id);
@@ -1196,14 +1181,6 @@ meta_kms_impl_device_update_states (MetaKmsImplDevice *impl_device,
     clear_latched_fd_hold (impl_device);
 
   return changes;
-
-err:
-  g_clear_list (&priv->planes, g_object_unref);
-  g_clear_list (&priv->crtcs, g_object_unref);
-  g_clear_list (&priv->connectors, g_object_unref);
-  g_clear_pointer (&priv->crtc_frames, g_hash_table_unref);
-
-  return META_KMS_RESOURCE_CHANGE_FULL;
 }
 
 static MetaKmsResourceChanges

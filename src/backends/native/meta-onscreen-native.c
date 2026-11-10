@@ -564,8 +564,10 @@ page_flip_feedback_discarded (MetaKmsCrtc  *kms_crtc,
   if (error &&
       !g_error_matches (error,
                         G_IO_ERROR,
-                        G_IO_ERROR_PERMISSION_DENIED))
-
+                        G_IO_ERROR_PERMISSION_DENIED) &&
+      !g_error_matches (error,
+                        G_IO_ERROR,
+                        G_IO_ERROR_NO_SUCH_DEVICE))
     g_warning ("Page flip discarded: %s", error->message);
 
   frame_info->flags |= COGL_FRAME_INFO_FLAG_DISCARDED;
@@ -973,9 +975,10 @@ import_shared_framebuffer (CoglOnscreen                        *onscreen,
                                        &error);
   if (!imported_buffer)
     {
-      g_warning ("Zero-copy disabled for %s, import failed: %s",
-                 meta_render_device_get_name (render_device),
-                 error->message);
+      meta_topic (META_DEBUG_KMS,
+                  "Zero-copy disabled for %s, import failed: %s",
+                  meta_render_device_get_name (render_device),
+                  error->message);
       secondary_gpu_state->import_status =
         META_SHARED_FRAMEBUFFER_IMPORT_STATUS_FAILED;
       return NULL;
@@ -1489,7 +1492,10 @@ swap_buffer_result_feedback (const MetaKmsFeedback *kms_feedback,
                         META_KMS_ERROR_DISCARDED) &&
       !g_error_matches (error,
                         G_IO_ERROR,
-                        G_IO_ERROR_PERMISSION_DENIED))
+                        G_IO_ERROR_PERMISSION_DENIED) &&
+      !g_error_matches (error,
+                        G_IO_ERROR,
+                        G_IO_ERROR_NO_SUCH_DEVICE))
     g_warning ("Page flip failed: %s", error->message);
 
   frame_info->flags |= COGL_FRAME_INFO_FLAG_DISCARDED;
@@ -2425,6 +2431,9 @@ finish_frame_result_feedback (const MetaKmsFeedback *kms_feedback,
   if (!g_error_matches (error,
                         G_IO_ERROR,
                         G_IO_ERROR_PERMISSION_DENIED) &&
+      !g_error_matches (error,
+                        G_IO_ERROR,
+                        G_IO_ERROR_NO_SUCH_DEVICE) &&
       !g_error_matches (error,
                         META_KMS_ERROR,
                         META_KMS_ERROR_EMPTY_UPDATE))
