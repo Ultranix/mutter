@@ -49,6 +49,86 @@ COGL_DRIVER=vulkan build/src/mutter --wayland
 Leave `-Dvulkan` at the default (`disabled`) for a normal GL-only build.
 `COGL_DRIVER` accepts `gl3`, `gles2` or `vulkan`.
 
+## GNOME Shell integration
+
+GNOME Shell integration is implemented. GNOME Shell has been built and run
+with the Vulkan backend on Ubuntu, including overview and Show Apps
+animations, window operations, and Wayland clients. GNOME Shell embeds Mutter
+and uses its Cogl and Clutter libraries; select the backend on the
+`gnome-shell` process with `COGL_DRIVER=vulkan`.
+
+Build and install this Mutter first, then build GNOME Shell against the
+installed libraries and GObject introspection data. Both projects must use
+the same Mutter API version. The current tree uses **API 52**, matching
+GNOME Shell `main` at the time of this update. The earlier Ubuntu deployment
+used GNOME Shell 51.rc with the corresponding API 51 Mutter build.
+
+Install the development dependencies for both projects, including Meson,
+Ninja, pkg-config, Vulkan headers, shaderc, GObject introspection, GJS, GTK,
+and the GNOME libraries required by their Meson files. The distribution's
+Mutter and GNOME Shell build dependencies provide a starting point; the
+development branches may require newer versions.
+
+### Build Mutter with Vulkan and introspection
+
+Run these commands from a parent directory containing the source checkouts:
+
+```sh
+git clone --branch main https://github.com/Ultranix/mutter.git mutter-vulkan
+git clone --branch main https://gitlab.gnome.org/GNOME/gnome-shell.git
+
+export MUTTER_VK_PREFIX=/opt/mutter-vulkan
+export MUTTER_VK_API=52
+
+meson setup mutter-vulkan/build-shell mutter-vulkan \
+  --prefix="$MUTTER_VK_PREFIX" --libdir=lib \
+  --buildtype=debugoptimized \
+  -Dvulkan=enabled -Dintrospection=true -Dfonts=true \
+  -Dtests=disabled -Ddocs=false
+meson compile -C mutter-vulkan/build-shell
+sudo meson install -C mutter-vulkan/build-shell --no-rebuild
+```
+
+### Build GNOME Shell against the installed Mutter
+
+Keep these variables set during configuration, compilation and execution:
+
+```sh
+export PKG_CONFIG_PATH="$MUTTER_VK_PREFIX/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+export LD_LIBRARY_PATH="$MUTTER_VK_PREFIX/lib:$MUTTER_VK_PREFIX/lib/mutter-$MUTTER_VK_API:$MUTTER_VK_PREFIX/lib/gnome-shell${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export GI_TYPELIB_PATH="$MUTTER_VK_PREFIX/lib/mutter-$MUTTER_VK_API:$MUTTER_VK_PREFIX/lib/gnome-shell:$MUTTER_VK_PREFIX/lib/girepository-1.0${GI_TYPELIB_PATH:+:$GI_TYPELIB_PATH}"
+export XDG_DATA_DIRS="$MUTTER_VK_PREFIX/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+
+pkg-config --modversion "libmutter-$MUTTER_VK_API"
+pkg-config --variable=prefix "libmutter-$MUTTER_VK_API"
+
+meson setup gnome-shell/build-vulkan gnome-shell \
+  --prefix="$MUTTER_VK_PREFIX" --libdir=lib \
+  --buildtype=debugoptimized -Dtests=false -Dgtk_doc=false -Dman=false
+meson compile -C gnome-shell/build-vulkan
+sudo meson install -C gnome-shell/build-vulkan --no-rebuild
+sudo glib-compile-schemas "$MUTTER_VK_PREFIX/share/glib-2.0/schemas"
+```
+
+The printed pkg-config prefix must be `/opt/mutter-vulkan`. Check that
+`libmutter_api_version` in Mutter's `meson.build` and `mutter_api_version` in
+GNOME Shell's `meson.build` agree before building. Introspection must remain
+enabled because Shell's JavaScript code imports Meta, Clutter and Cogl.
+
+### Run GNOME Shell with Vulkan
+
+From a separate local TTY, with the variables above exported:
+
+```sh
+export GSETTINGS_SCHEMA_DIR="$MUTTER_VK_PREFIX/share/glib-2.0/schemas"
+dbus-run-session -- env COGL_DRIVER=vulkan \
+  "$MUTTER_VK_PREFIX/bin/gnome-shell" --wayland
+```
+
+A GDM session launcher should export the same library, introspection, data
+and schema paths, set `COGL_DRIVER=vulkan`, and execute the installed
+`gnome-shell` binary.
+
 ## Vulkan driver features
 
 ### Cogl Vulkan backend (`cogl/cogl/driver/vk/`)
