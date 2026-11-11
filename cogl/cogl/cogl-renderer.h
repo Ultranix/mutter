@@ -100,6 +100,8 @@ typedef enum
  * @COGL_RENDERER_FEATURE_CONTEXT_PRIORITY: Context priority support
  * @COGL_RENDERER_FEATURE_NO_CONFIG_CONTEXT: No-config context support
  * @COGL_RENDERER_FEATURE_OFFSCREEN_ONLY: Rendering requires imported framebuffers
+ * @COGL_RENDERER_FEATURE_DMA_BUF_REQUIRES_EXPLICIT_SYNC: Exported DMA buffers
+ *   require explicit synchronization before a consumer can read them
  */
 typedef enum _CoglRendererFeature
 {
@@ -109,6 +111,7 @@ typedef enum _CoglRendererFeature
   COGL_RENDERER_FEATURE_CONTEXT_PRIORITY,
   COGL_RENDERER_FEATURE_NO_CONFIG_CONTEXT,
   COGL_RENDERER_FEATURE_OFFSCREEN_ONLY,
+  COGL_RENDERER_FEATURE_DMA_BUF_REQUIRES_EXPLICIT_SYNC,
 
   COGL_RENDERER_N_FEATURES
 } CoglRendererFeature;

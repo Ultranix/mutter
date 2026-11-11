@@ -343,6 +343,10 @@ cogl_renderer_egl_init_extensions (CoglRendererEGL *renderer_egl)
 
   priv->private_features = 0;
 
+  cogl_renderer_set_feature (
+    renderer, COGL_RENDERER_FEATURE_DMA_BUF_REQUIRES_EXPLICIT_SYNC,
+    g_strcmp0 (eglQueryString (priv->edisplay, EGL_VENDOR), "NVIDIA") == 0);
+
   if (cogl_check_extension ("EGL_NOK_swap_region", split_extensions))
     {
       GET_EGL_PROC_ADDR (eglSwapBuffersRegionNOK);

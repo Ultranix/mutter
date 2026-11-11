@@ -2701,9 +2701,6 @@ maybe_create_syncobj (MetaStreamSource  *source,
                        g_steal_pointer (&timeline));
 }
 
-/* The NVIDIA driver does not attach fences to dma-bufs, so consumers relying on
- * implicit synchronization can read a buffer the GPU is still writing.
- */
 static gboolean
 dma_bufs_require_explicit_sync (MetaStreamSource *source)
 {
@@ -2713,13 +2710,9 @@ dma_bufs_require_explicit_sync (MetaStreamSource *source)
   CoglContext *cogl_context =
     clutter_backend_get_cogl_context (clutter_backend);
   CoglRenderer *cogl_renderer = cogl_context_get_renderer (cogl_context);
-  const char *egl_vendor;
 
-  egl_vendor =
-    cogl_renderer_egl_query_string (COGL_RENDERER_EGL (cogl_renderer),
-                                    EGL_VENDOR);
-
-  return g_strcmp0 (egl_vendor, "NVIDIA") == 0;
+  return cogl_renderer_has_feature (
+    cogl_renderer, COGL_RENDERER_FEATURE_DMA_BUF_REQUIRES_EXPLICIT_SYNC);
 }
 
 static void

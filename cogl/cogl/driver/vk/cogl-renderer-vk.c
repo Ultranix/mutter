@@ -296,4 +296,9 @@ cogl_renderer_vk_init (CoglRendererVk *renderer_vk)
 {
   cogl_renderer_set_feature (COGL_RENDERER (renderer_vk),
                              COGL_RENDERER_FEATURE_OFFSCREEN_ONLY, TRUE);
+
+  /* Vulkan submissions do not attach implicit fences to exported DMA buffers. */
+  cogl_renderer_set_feature (
+    COGL_RENDERER (renderer_vk),
+    COGL_RENDERER_FEATURE_DMA_BUF_REQUIRES_EXPLICIT_SYNC, TRUE);
 }
