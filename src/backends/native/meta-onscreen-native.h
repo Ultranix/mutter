@@ -69,9 +69,5 @@ void meta_onscreen_native_invalidate (MetaOnscreenNative *onscreen_native);
 
 void meta_onscreen_native_detach (MetaOnscreenNative *onscreen_native);
 
-void
-meta_onscreen_native_allow_vrr (MetaOnscreenNative *onscreen_native,
-                                gboolean            allowed);
-
 EGLSurface
 meta_onscreen_native_get_egl_surface (MetaOnscreenNative *onscreen_native);
