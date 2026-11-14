@@ -189,15 +189,16 @@ meta_dbus_access_checker_allow_sender (MetaDbusAccessChecker *self,
 }
 
 gboolean
-meta_dbus_access_checker_is_sender_allowed (MetaDbusAccessChecker *self,
-                                            const char            *sender_name)
+meta_dbus_access_checker_is_allowed (MetaDbusAccessChecker *self,
+                                     GDBusMethodInvocation *invocation)
 {
-  int i;
+  const char *sender_name =
+    g_dbus_method_invocation_get_sender (invocation);
 
   if (meta_context_get_unsafe_mode (self->context))
     return TRUE;
 
-  for (i = 0; i < self->allowed_senders->len; i++)
+  for (size_t i = 0; i < self->allowed_senders->len; i++)
     {
       AllowedSender *allowed_sender;
 
@@ -209,4 +210,25 @@ meta_dbus_access_checker_is_sender_allowed (MetaDbusAccessChecker *self,
     }
 
   return FALSE;
+}
+
+const char *
+meta_dbus_access_checker_find_sender (MetaDbusAccessChecker *self,
+                                      GDBusMethodInvocation *invocation)
+{
+  const char *sender_name =
+    g_dbus_method_invocation_get_sender (invocation);
+
+  for (size_t i = 0; i < self->allowed_senders->len; i++)
+    {
+      AllowedSender *allowed_sender;
+
+      allowed_sender = g_ptr_array_index (self->allowed_senders, i);
+
+      if (sender_name &&
+          g_strcmp0 (allowed_sender->name_owner, sender_name) == 0)
+        return allowed_sender->name;
+    }
+
+  return NULL;
 }
