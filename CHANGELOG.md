@@ -3,7 +3,7 @@
 Version numbers below identify releases of this fork, independently of
 upstream Mutter versions and library ABI numbers.
 
-## Unreleased — 2026-11-15
+## 1.2 — 2026-11-15
 
 - Disable the strong DMA-BUF import memo so closed clients' buffers can be
   released after their owners and outstanding GPU work are gone.

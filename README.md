@@ -18,6 +18,11 @@ More detail: [doc/vulkan.md](doc/vulkan.md).
 
 ## Fork releases
 
+Release **1.2** (2026-11-15) adds bounded Vulkan image-memory reuse, idle
+retirement, memory-pressure handling and DMA-BUF import lifetime fixes. The
+private image pool is limited to 64 MiB and eight entries, with a two-second
+idle expiry. See [CHANGELOG.md](CHANGELOG.md) for details and validation.
+
 Release **1.1** integrates upstream `main` through `b766717ac9` and the
 subsequent Vulkan resource lifetime and rendering changes. Release **1.0**
 preserves the previous GitHub `main` at `d7fbd2fc953b`. These are fork release
