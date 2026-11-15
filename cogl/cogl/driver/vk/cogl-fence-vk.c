@@ -336,6 +336,7 @@ cogl_vk_fence_ticket_release (CoglVkFenceTicket *ticket)
   else
     {
       g_ptr_array_add (ticket->device->fence_inflight, ticket);
+      cogl_vk_image_pool_schedule (ticket->device);
       cogl_vk_debug_log ("fence",
                          "release → inflight ticket=%p point=%" G_GUINT64_FORMAT
                          " inflight=%u",

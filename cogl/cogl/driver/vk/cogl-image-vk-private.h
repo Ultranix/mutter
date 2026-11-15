@@ -37,6 +37,8 @@ typedef struct _CoglVkImage CoglVkImage;
 struct _CoglVkImage
 {
   CoglVkDevice *device; /* unowned */
+  VkDeviceSize reusable_memory_size;
+  uint32_t reusable_memory_type;
   VkImage image;
   /* Single-plane or disjoint: memories[0..n_memories). */
   VkDeviceMemory memories[4];
@@ -107,6 +109,7 @@ gboolean cogl_vk_dmabuf_format_supported (CoglVkDevice     *device,
                                           VkImageUsageFlags usage,
                                           uint32_t         *n_planes);
 
+COGL_EXPORT_TEST
 CoglVkImage * cogl_vk_image_new_optimal (CoglVkDevice     *device,
                                          uint32_t          width,
                                          uint32_t          height,
@@ -198,6 +201,7 @@ void cogl_vk_image_free (CoglVkImage *image);
 
 /* Destroy now, without flushing or waiting: only for an image the GPU is
  * known to be done with (a signaled retire ticket, or an idle device). */
+COGL_EXPORT_TEST
 void cogl_vk_image_destroy_now (CoglVkImage *image);
 
 COGL_EXPORT void cogl_vk_image_cmd_barrier (CoglVkImage         *image,
@@ -241,3 +245,8 @@ COGL_EXPORT CoglVkImage * cogl_vk_image_new_nv12 (CoglVkDevice            *devic
 gboolean cogl_vk_image_set_ycbcr_conversion (CoglVkImage             *image,
                                              VkSamplerYcbcrConversion conversion,
                                              GError                 **error);
+
+COGL_EXPORT_TEST
+void cogl_vk_image_pool_clear (CoglVkDevice *device);
+
+void cogl_vk_image_pool_schedule (CoglVkDevice *device);

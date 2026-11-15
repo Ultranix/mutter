@@ -1,5 +1,38 @@
 # Experimental Vulkan renderer
 
+## Image lifetime and memory reuse
+
+The driver's strong-reference DMA-BUF memo is disabled. Wayland buffers and
+output framebuffers own their imports, and final disposal still waits for GPU
+completion. The memo helpers remain available to existing unit tests.
+
+Private, single-sample optimal images can reuse backing `VkDeviceMemory` from
+an exact-size, exact-memory-type pool capped at **64 MiB and eight entries**.
+Old images and views are destroyed after GPU completion; only backing memory
+is reused. Imported, mapped, multisample and other allocation paths keep their
+existing direct-release behavior. This budget covers the idle pool, not live
+textures or internal driver allocations.
+
+A 100 ms source on the owning main context drains pending submissions even
+when no new frames arrive. Pooled allocations expire after two seconds idle,
+and the source removes itself when no pending or cached work remains. Memory
+warnings purge available entries on that context. Allocation failure clears
+the pool and retries once. Teardown stops collection and releases the pool
+before destroying the Vulkan device.
+
+### Validation
+
+On Intel i915 at 1280×720, six fresh GTK4 GL client windows (1100×650 requested)
+were opened and closed, followed by three seconds idle. The old Vulkan render
+client retained 73632 KiB resident, including 24 MiB shared. The updated path
+retained 49008 KiB resident and zero shared; the separate display client was
+3288 KiB in both cases. GLES2 retained 19484 KiB resident and zero shared.
+These are isolated compositor measurements, not full GNOME Shell session totals.
+
+All 47 Vulkan conformance tests passed. Pool tests cover entry/byte limits,
+reuse, memory-warning purge and idle expiry on a real Vulkan device. The
+low-level test also passed with Vulkan synchronization validation enabled.
+
 The Vulkan Cogl driver is optional and leaves the default GL renderer enabled.
 Configure it with Vulkan headers and shaderc installed:
 

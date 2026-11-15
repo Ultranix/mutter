@@ -3,6 +3,20 @@
 Version numbers below identify releases of this fork, independently of
 upstream Mutter versions and library ABI numbers.
 
+## Unreleased — 2026-11-15
+
+- Disable the strong DMA-BUF import memo so closed clients' buffers can be
+  released after their owners and outstanding GPU work are gone.
+- Add exact-size and memory-type reuse for private single-sample optimal-image
+  allocations, bounded to 64 MiB and eight idle entries.
+- Expire pooled allocations after two seconds idle and drain pending GPU
+  retirement even when the compositor stops producing frames.
+- Purge available allocations on memory-pressure warnings; clear the pool and
+  retry once on allocation failure. Shut down collection safely during teardown.
+- Add real-device tests for pool limits, reuse, pressure handling and idle expiry.
+  Validate all 47 Vulkan conformance tests and the low-level synchronization
+  validation run; document isolated compositor memory measurements.
+
 ## 1.1 — 2026-11-10
 
 - Merge upstream main through `b766717ac9`, including runtime DRM device

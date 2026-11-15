@@ -1006,6 +1006,165 @@ cogl_vk_image_ensure_attachment_view (CoglVkImage *image,
   return TRUE;
 }
 
+
+/* Only private, optimal images participate. External and mapped allocations
+ * retain their original ownership rules. Entries reach this pool only after
+ * the referencing submission completes and the VkImage is destroyed.
+ */
+#define IMAGE_POOL_MAX_BYTES (64 * 1024 * 1024)
+#define IMAGE_POOL_MAX_ENTRIES 8
+#define IMAGE_POOL_IDLE_US (2 * G_USEC_PER_SEC)
+
+typedef struct
+{
+  VkDeviceMemory memory;
+  VkDeviceSize size;
+  uint32_t memory_type;
+  gint64 released_at;
+} ImageMemoryEntry;
+
+static void
+image_pool_evict_head (CoglVkDevice *device)
+{
+  ImageMemoryEntry *entry = g_queue_pop_head (&device->image_memory_pool);
+
+  device->image_memory_pool_bytes -= entry->size;
+  vkFreeMemory (device->device, entry->memory, NULL);
+  g_free (entry);
+}
+
+static void
+image_pool_low_memory (GMemoryMonitor             *monitor,
+                       GMemoryMonitorWarningLevel level,
+                       gpointer                    data)
+{
+  gint *pressure = data;
+
+  /* The closure owns this flag even if teardown races with signal emission. */
+  g_atomic_int_set (pressure, 1);
+}
+
+static void
+image_pool_pressure_free (gpointer data, GClosure *closure)
+{
+  g_free (data);
+}
+
+static gboolean
+image_pool_collect (gpointer data)
+{
+  CoglVkDevice *device = data;
+  ImageMemoryEntry *entry;
+  gint64 now = g_get_monotonic_time ();
+  gboolean pressure = g_atomic_int_exchange (device->image_memory_pressure, 0);
+
+  cogl_vk_device_drain_fence_pool (device);
+  while ((entry = g_queue_peek_head (&device->image_memory_pool)) &&
+         (pressure || device->device_lost ||
+          now - entry->released_at >= IMAGE_POOL_IDLE_US))
+    image_pool_evict_head (device);
+
+  if (g_queue_is_empty (&device->image_memory_pool) &&
+      (!device->fence_inflight || device->fence_inflight->len == 0) &&
+      (!device->oneshot_pending || device->oneshot_pending->len == 0))
+    {
+      g_clear_pointer (&device->image_gc_source, g_source_unref);
+      return G_SOURCE_REMOVE;
+    }
+
+  return G_SOURCE_CONTINUE;
+}
+
+void
+cogl_vk_image_pool_schedule (CoglVkDevice *device)
+{
+  if (device->image_gc_source || device->image_pool_shutdown)
+    return;
+
+  if (!device->image_memory_monitor)
+    {
+      device->image_memory_monitor = G_OBJECT (g_memory_monitor_dup_default ());
+      device->image_memory_pressure = g_new0 (gint, 1);
+      g_signal_connect_data (device->image_memory_monitor, "low-memory-warning",
+                             G_CALLBACK (image_pool_low_memory),
+                             device->image_memory_pressure,
+                             image_pool_pressure_free, 0);
+    }
+  device->image_gc_source = g_timeout_source_new (100);
+  g_source_set_name (device->image_gc_source, "Cogl Vulkan image retirement");
+  g_source_set_callback (device->image_gc_source, image_pool_collect, device, NULL);
+  g_source_attach (device->image_gc_source, g_main_context_get_thread_default ());
+}
+
+void
+cogl_vk_image_pool_clear (CoglVkDevice *device)
+{
+  if (device->image_pool_shutdown && device->image_gc_source)
+    {
+      g_source_destroy (device->image_gc_source);
+      g_clear_pointer (&device->image_gc_source, g_source_unref);
+    }
+  while (!g_queue_is_empty (&device->image_memory_pool))
+    image_pool_evict_head (device);
+  if (device->image_pool_shutdown && device->image_memory_monitor)
+    {
+      g_signal_handlers_disconnect_by_data (device->image_memory_monitor,
+                                            device->image_memory_pressure);
+      device->image_memory_pressure = NULL;
+      g_clear_object (&device->image_memory_monitor);
+    }
+}
+
+static VkDeviceMemory
+image_pool_take (CoglVkDevice *device,
+                 VkDeviceSize size,
+                 uint32_t     memory_type)
+{
+  for (GList *link = device->image_memory_pool.head; link; link = link->next)
+    {
+      ImageMemoryEntry *entry = link->data;
+
+      if (entry->size == size && entry->memory_type == memory_type)
+        {
+          VkDeviceMemory memory = entry->memory;
+
+          device->image_memory_pool_bytes -= entry->size;
+          g_queue_delete_link (&device->image_memory_pool, link);
+          g_free (entry);
+          return memory;
+        }
+    }
+  return VK_NULL_HANDLE;
+}
+
+static void
+image_pool_put (CoglVkImage *image, VkDeviceMemory memory)
+{
+  CoglVkDevice *device = image->device;
+  ImageMemoryEntry *entry;
+
+  if (!image->reusable_memory_size || device->image_pool_shutdown ||
+      device->device_lost || image->reusable_memory_size > IMAGE_POOL_MAX_BYTES)
+    {
+      vkFreeMemory (device->device, memory, NULL);
+      return;
+    }
+
+  while (device->image_memory_pool.length >= IMAGE_POOL_MAX_ENTRIES ||
+         device->image_memory_pool_bytes + image->reusable_memory_size >
+         IMAGE_POOL_MAX_BYTES)
+    image_pool_evict_head (device);
+
+  entry = g_new0 (ImageMemoryEntry, 1);
+  entry->memory = memory;
+  entry->size = image->reusable_memory_size;
+  entry->memory_type = image->reusable_memory_type;
+  entry->released_at = g_get_monotonic_time ();
+  g_queue_push_tail (&device->image_memory_pool, entry);
+  device->image_memory_pool_bytes += entry->size;
+  cogl_vk_image_pool_schedule (device);
+}
+
 static CoglVkImage *
 image_new_optimal_mips_full (CoglVkDevice            *device,
                              uint32_t                 width,
@@ -1073,7 +1232,15 @@ image_new_optimal_mips_full (CoglVkDevice            *device,
   alloc_info.allocationSize = reqs.size;
   alloc_info.memoryTypeIndex = (uint32_t) mem_type;
 
-  res = vkAllocateMemory (device->device, &alloc_info, NULL, &img->memories[0]);
+  img->memories[0] = image_pool_take (device, reqs.size, mem_type);
+  res = VK_SUCCESS;
+  if (img->memories[0] == VK_NULL_HANDLE)
+    res = vkAllocateMemory (device->device, &alloc_info, NULL, &img->memories[0]);
+  if (res == VK_ERROR_OUT_OF_DEVICE_MEMORY || res == VK_ERROR_OUT_OF_HOST_MEMORY)
+    {
+      cogl_vk_image_pool_clear (device);
+      res = vkAllocateMemory (device->device, &alloc_info, NULL, &img->memories[0]);
+    }
   if (res != VK_SUCCESS)
     {
       g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
@@ -1098,6 +1265,8 @@ image_new_optimal_mips_full (CoglVkDevice            *device,
       return NULL;
     }
 
+  img->reusable_memory_size = reqs.size;
+  img->reusable_memory_type = mem_type;
   return img;
 }
 
@@ -2072,6 +2241,7 @@ cogl_vk_image_free (CoglVkImage *image)
           cogl_vk_debug_log ("tex", "image_free retired img=%p %ux%u",
                              (void *) image, image->width, image->height);
           cogl_vk_retire_list_add_image (retire, image);
+          cogl_vk_image_pool_schedule (image->device);
           return;
         }
       if (result == COGL_VK_RETIRE_COMPLETE)
@@ -2119,7 +2289,7 @@ cogl_vk_image_destroy_now (CoglVkImage *image)
       for (i = 0; i < image->n_memories; i++)
         {
           if (image->memories[i] != VK_NULL_HANDLE)
-            vkFreeMemory (image->device->device, image->memories[i], NULL);
+            image_pool_put (image, image->memories[i]);
         }
     }
   g_free (image);

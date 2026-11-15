@@ -477,7 +477,75 @@ test_shader_cache_mutation (void)
   check_cached_pipeline (fb, child, primitive, 0xff0000ff);
 }
 
+
+static void
+test_image_memory_pool (void)
+{
+  CoglVkImage *images[10];
+  VkDeviceMemory memory;
+  g_autoptr (GError) error = NULL;
+  gint64 deadline;
+
+  device = ((CoglDriverVk *) cogl_context_get_driver (test_ctx))->vk_device;
+  cogl_vk_image_pool_clear (device);
+  for (unsigned int size = 128; size <= 2048; size *= 16)
+    {
+      for (unsigned int i = 0; i < G_N_ELEMENTS (images); i++)
+        {
+          images[i] = cogl_vk_image_new_optimal (
+            device, size, size, VK_FORMAT_R8G8B8A8_UNORM,
+            COGL_PIXEL_FORMAT_RGBA_8888,
+            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+            &error);
+          g_assert_no_error (error);
+          g_assert_nonnull (images[i]);
+        }
+      for (unsigned int i = 0; i < G_N_ELEMENTS (images); i++)
+        cogl_vk_image_destroy_now (images[i]);
+      g_assert_cmpuint (device->image_memory_pool.length, <=, 8);
+      g_assert_cmpuint (device->image_memory_pool_bytes, <=, 64 * 1024 * 1024);
+      cogl_vk_image_pool_clear (device);
+    }
+
+  images[0] = cogl_vk_image_new_optimal (
+    device, 128, 128, VK_FORMAT_R8G8B8A8_UNORM, COGL_PIXEL_FORMAT_RGBA_8888,
+    VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, &error);
+  g_assert_no_error (error);
+  memory = images[0]->memories[0];
+  cogl_vk_image_destroy_now (images[0]);
+  images[0] = cogl_vk_image_new_optimal (
+    device, 128, 128, VK_FORMAT_R8G8B8A8_UNORM, COGL_PIXEL_FORMAT_RGBA_8888,
+    VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, &error);
+  g_assert_no_error (error);
+  g_assert_true (images[0]->memories[0] == memory);
+  cogl_vk_image_destroy_now (images[0]);
+
+  g_signal_emit_by_name (device->image_memory_monitor, "low-memory-warning",
+                        G_MEMORY_MONITOR_WARNING_LEVEL_LOW);
+  deadline = g_get_monotonic_time () + G_USEC_PER_SEC;
+  while (device->image_memory_pool_bytes && g_get_monotonic_time () < deadline)
+    {
+      g_main_context_iteration (NULL, FALSE);
+      g_usleep (1000);
+    }
+  g_assert_cmpuint (device->image_memory_pool_bytes, ==, 0);
+
+  images[0] = cogl_vk_image_new_optimal (
+    device, 128, 128, VK_FORMAT_R8G8B8A8_UNORM, COGL_PIXEL_FORMAT_RGBA_8888,
+    VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, &error);
+  g_assert_no_error (error);
+  cogl_vk_image_destroy_now (images[0]);
+  deadline = g_get_monotonic_time () + 3 * G_USEC_PER_SEC;
+  while (device->image_memory_pool_bytes && g_get_monotonic_time () < deadline)
+    {
+      g_main_context_iteration (NULL, FALSE);
+      g_usleep (1000);
+    }
+  g_assert_cmpuint (device->image_memory_pool_bytes, ==, 0);
+}
+
 COGL_TEST_SUITE (
+  g_test_add_func ("/vk-low-level/image-memory-pool", test_image_memory_pool);
   g_test_add_func ("/vk-low-level/shader-cache-mutation", test_shader_cache_mutation);
   g_test_add_func ("/vk-low-level/nv12-colorimetry", test_nv12_colorimetry);
   g_test_add_data_func ("/vk-low-level/separate-depth-stencil", GINT_TO_POINTER (0), test_separate_depth_stencil);

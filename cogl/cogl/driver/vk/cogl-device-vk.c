@@ -23,6 +23,7 @@
 
 #include "cogl/driver/vk/cogl-device-vk-private.h"
 #include "cogl/driver/vk/cogl-fence-vk-private.h"
+#include "cogl/driver/vk/cogl-image-vk-private.h"
 
 #include "cogl/cogl-debug.h"
 
@@ -805,6 +806,8 @@ cogl_vk_device_free (CoglVkDevice *device)
         g_error ("Cogl Vulkan: device teardown wait failed (%d)", (int) res);
     }
 
+  device->image_pool_shutdown = TRUE;
+  cogl_vk_image_pool_clear (device);
   cogl_vk_vbo_device_clear (device);
   reap_oneshots (device, TRUE);
   g_clear_pointer (&device->oneshot_pending, g_ptr_array_unref);
@@ -842,6 +845,7 @@ cogl_vk_device_defer_oneshot (CoglVkDevice    *device,
   if (!device->oneshot_pending)
     device->oneshot_pending = g_ptr_array_new ();
   g_ptr_array_add (device->oneshot_pending, pending);
+  cogl_vk_image_pool_schedule (device);
   return pending;
 }
 

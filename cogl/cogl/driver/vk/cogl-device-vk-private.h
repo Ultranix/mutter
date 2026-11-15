@@ -78,6 +78,12 @@ typedef VkResult (VKAPI_PTR *CoglVkGetDeviceFaultInfoEXT) (VkDevice device,
 
 struct _CoglVkDevice
 {
+  GObject *image_memory_monitor;
+  gint *image_memory_pressure;
+  GQueue image_memory_pool;
+  VkDeviceSize image_memory_pool_bytes;
+  GSource *image_gc_source;
+  gboolean image_pool_shutdown;
   VkInstance instance;
   VkPhysicalDevice physical_device;
   VkPhysicalDeviceLimits limits;

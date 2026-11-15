@@ -405,7 +405,10 @@ cogl_driver_vk_initialize (CoglDriverVk  *driver_vk,
       return FALSE;
     }
 
-  driver_vk->dmabuf_memo = cogl_vk_dmabuf_memo_new ();
+  /* Wayland buffers and output framebuffers already own their imported
+   * textures. A global strong-reference memo would keep obsolete DMA-BUFs
+   * alive after those owners release them.
+   */
 
   /* TIMESTAMP_QUERY: feature bit after device knows timestampPeriod.
    * update_features runs before context_init, so set it here.
