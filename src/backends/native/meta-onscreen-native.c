@@ -2311,6 +2311,7 @@ on_vrr_allowed_changed (MetaRendererView   *view,
                          CLUTTER_FRAME_CLOCK_MODE_FIXED;
       clutter_frame_clock_set_mode (frame_clock, frame_clock_mode);
       onscreen_native->property.vrr.invalidated = TRUE;
+      clutter_stage_view_schedule_update (stage_view);
     }
 }
 
@@ -3125,14 +3126,6 @@ create_surfaces_gbm (CoglOnscreen        *onscreen,
   return TRUE;
 }
 
-void
-meta_onscreen_native_set_view (CoglOnscreen     *onscreen,
-                               MetaRendererView *view)
-{
-  MetaOnscreenNative *onscreen_native = META_ONSCREEN_NATIVE (onscreen);
-  onscreen_native->view = view;
-}
-
 static gboolean
 meta_onscreen_native_is_nvidia (MetaOnscreenNative *onscreen_native)
 {
@@ -3752,6 +3745,69 @@ on_privacy_screen_enabled_changed (MetaOutput         *output,
   clutter_stage_view_schedule_update (stage_view);
 }
 
+static void
+clear_invalidation_handlers (MetaOnscreenNative *onscreen_native)
+{
+  g_clear_signal_handler (&onscreen_native->property.gamma_lut.signal_handler_id,
+                          onscreen_native->crtc);
+  g_clear_signal_handler (&onscreen_native->property.ctm.signal_handler_id,
+                          onscreen_native->crtc);
+  g_clear_signal_handler (&onscreen_native->property.privacy_screen.signal_handler_id,
+                          onscreen_native->output);
+  g_clear_signal_handler (&onscreen_native->property.vrr.signal_handler_id,
+                          onscreen_native->view);
+}
+
+void
+meta_onscreen_native_set_view (CoglOnscreen     *onscreen,
+                               MetaRendererView *view)
+{
+  MetaOnscreenNative *onscreen_native = META_ONSCREEN_NATIVE (onscreen);
+  const MetaOutputInfo *output_info =
+    meta_output_get_info (onscreen_native->output);
+
+  meta_onscreen_native_detach (onscreen_native);
+
+  onscreen_native->view = view;
+
+  if (meta_crtc_get_gamma_lut_size (onscreen_native->crtc) > 0)
+    {
+      onscreen_native->property.gamma_lut.invalidated = TRUE;
+      onscreen_native->property.gamma_lut.signal_handler_id =
+        g_signal_connect (onscreen_native->crtc, "gamma-lut-changed",
+                          G_CALLBACK (on_gamma_lut_changed),
+                          onscreen_native);
+    }
+
+  if (meta_crtc_is_ctm_supported (onscreen_native->crtc))
+    {
+      onscreen_native->property.ctm.invalidated = TRUE;
+      onscreen_native->property.ctm.signal_handler_id =
+        g_signal_connect (onscreen_native->crtc, "ctm-changed",
+                          G_CALLBACK (on_ctm_changed),
+                          onscreen_native);
+    }
+
+  if (output_info->supports_privacy_screen)
+    {
+      onscreen_native->property.privacy_screen.invalidated = TRUE;
+      onscreen_native->property.privacy_screen.signal_handler_id =
+        g_signal_connect (onscreen_native->output,
+                          "notify::is-privacy-screen-enabled",
+                          G_CALLBACK (on_privacy_screen_enabled_changed),
+                          onscreen_native);
+    }
+
+  if (output_info->supports_vrr)
+    {
+      onscreen_native->property.vrr.invalidated = TRUE;
+      onscreen_native->property.vrr.signal_handler_id =
+        g_signal_connect (view, "notify::is-vrr-allowed",
+                          G_CALLBACK (on_vrr_allowed_changed),
+                          onscreen_native);
+    }
+}
+
 MetaOnscreenNative *
 meta_onscreen_native_new (MetaRendererNative *renderer_native,
                           MetaGpuKms         *render_gpu,
@@ -3763,7 +3819,6 @@ meta_onscreen_native_new (MetaRendererNative *renderer_native,
 {
   MetaOnscreenNative *onscreen_native;
   CoglFramebufferDriverConfig driver_config;
-  const MetaOutputInfo *output_info = meta_output_get_info (output);
 
   driver_config = (CoglFramebufferDriverConfig) {
     .type = COGL_FRAMEBUFFER_DRIVER_TYPE_BACK,
@@ -3781,55 +3836,7 @@ meta_onscreen_native_new (MetaRendererNative *renderer_native,
   g_set_object (&onscreen_native->output, output);
   g_set_object (&onscreen_native->crtc, crtc);
 
-  if (meta_crtc_get_gamma_lut_size (crtc) > 0)
-    {
-      onscreen_native->property.gamma_lut.invalidated = TRUE;
-      onscreen_native->property.gamma_lut.signal_handler_id =
-        g_signal_connect (crtc, "gamma-lut-changed",
-                          G_CALLBACK (on_gamma_lut_changed),
-                          onscreen_native);
-    }
-
-  if (meta_crtc_is_ctm_supported (crtc))
-    {
-      onscreen_native->property.ctm.invalidated = TRUE;
-      onscreen_native->property.ctm.signal_handler_id =
-        g_signal_connect (crtc, "ctm-changed",
-                          G_CALLBACK (on_ctm_changed),
-                          onscreen_native);
-    }
-
-  if (output_info->supports_privacy_screen)
-    {
-      onscreen_native->property.privacy_screen.invalidated = TRUE;
-      onscreen_native->property.privacy_screen.signal_handler_id =
-        g_signal_connect (output, "notify::is-privacy-screen-enabled",
-                          G_CALLBACK (on_privacy_screen_enabled_changed),
-                          onscreen_native);
-    }
-
-  if (output_info->supports_vrr)
-    {
-      onscreen_native->property.vrr.signal_handler_id =
-        g_signal_connect (onscreen_native->view, "notify::is-vrr-allowed",
-                          G_CALLBACK (on_vrr_allowed_changed),
-                          onscreen_native);
-    }
-
   return onscreen_native;
-}
-
-static void
-clear_invalidation_handlers (MetaOnscreenNative *onscreen_native)
-{
-  g_clear_signal_handler (&onscreen_native->property.gamma_lut.signal_handler_id,
-                          onscreen_native->crtc);
-  g_clear_signal_handler (&onscreen_native->property.ctm.signal_handler_id,
-                          onscreen_native->crtc);
-  g_clear_signal_handler (&onscreen_native->property.privacy_screen.signal_handler_id,
-                          onscreen_native->output);
-  g_clear_signal_handler (&onscreen_native->property.vrr.signal_handler_id,
-                          onscreen_native->view);
 }
 
 static void
