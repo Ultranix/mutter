@@ -2755,6 +2755,7 @@ create_bos_gbm_attempt (CoglOnscreen *onscreen,
   CoglRenderer *cogl_renderer = cogl_display_get_renderer (cogl_display);
   MetaCrtcKms *crtc_kms = META_CRTC_KMS (onscreen_native->crtc);
   MetaKmsPlane *kms_plane = NULL;
+  MetaRendererNativeGpuData *crtc_gpu_data = NULL;
   uint32_t gbm_flags = GBM_BO_USE_RENDERING;
   size_t num_bos = G_N_ELEMENTS (onscreen_native->gbm.bos);
   MetaRenderDevice *render_device;
@@ -2767,7 +2768,18 @@ create_bos_gbm_attempt (CoglOnscreen *onscreen,
   int i;
 
   should_be_sharable = should_surface_be_sharable (onscreen);
-  if (!should_be_sharable)
+  if (should_be_sharable)
+    {
+      MetaGpu *crtc_gpu = meta_crtc_get_gpu (onscreen_native->crtc);
+
+      crtc_gpu_data =
+        meta_renderer_native_get_gpu_data (renderer_native,
+                                           META_GPU_KMS (crtc_gpu));
+    }
+
+  if (!should_be_sharable ||
+      crtc_gpu_data->secondary.copy_mode ==
+      META_SHARED_FRAMEBUFFER_COPY_MODE_ZERO)
     {
       kms_plane = meta_crtc_kms_get_assigned_primary_plane (crtc_kms);
       gbm_flags |= GBM_BO_USE_SCANOUT;
